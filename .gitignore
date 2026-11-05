@@ -32,3 +32,11 @@ Icon?
 
 # NFS temporary files
 .nfs*
+# Rust
+daemon/target/
+# Xcode
+apple/*.xcodeproj/
+apple/build/
+DerivedData/
+*.xcuserstate
+__pycache__/
