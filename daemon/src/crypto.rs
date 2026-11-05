@@ -206,6 +206,23 @@ mod tests {
         assert!(opener.open(&tampered).is_err());
     }
 
+    /// Shared with `apple/LoopMeKit/Tests/LoopMeKitTests/CryptoTests.swift`
+    /// (generated with Python `cryptography`, which follows the same RFCs as CryptoKit).
+    #[test]
+    fn cross_platform_vector() {
+        let mac = KeyPair::from_secret_bytes(core::array::from_fn(|i| i as u8 + 1));
+        let dev = KeyPair::from_secret_bytes(core::array::from_fn(|i| i as u8 + 101));
+        assert_eq!(b64(&mac.public_bytes()), "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=");
+        assert_eq!(b64(&dev.public_bytes()), "VxR2nRFr92Q2rnS8eT0sMK0ZA8WaxSc4BcfiaYtBDDY=");
+        let shared = mac.shared_secret(&dev.public_bytes());
+        assert_eq!(b64(&shared), "yepqP3mgALYLB21K/JkLJy8/C1qqPwuHE8IJJz42OGM=");
+        let k = derive_session_keys(&shared, &[7u8; 16], &[9u8; 16]);
+        assert_eq!(b64(&k.c2s), "qi6TOdRLZWDhxkfbYMzVK32BvUi4lsSL0x8x40Xe8HY=");
+        assert_eq!(b64(&k.s2c), "qxUFz+Y9wMnGIEunFVSKdDPBV0cgQM/XCpNUFCjr5ew=");
+        assert_eq!(b64(&FrameSealer::new(&k.c2s).seal(b"hello")), "AAAAAAAAAAAAAAAA83T5AE3+p7Bg+CcHg/9Egoq2yH6q");
+        assert_eq!(pairing_sas(&mac.public_bytes(), &dev.public_bytes()), "5832");
+    }
+
     #[test]
     fn sas_is_four_digits_and_order_sensitive() {
         let a = [1u8; 32];

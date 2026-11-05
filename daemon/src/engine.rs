@@ -319,6 +319,16 @@ async fn chat_thread(app: &App, client: &CodexClient, settings: &Settings) -> Re
 
 async fn run_one(app: &Arc<App>, kind: &RunKind) -> Result<()> {
     let settings = app.store.settings()?;
+    if app.status.lock().unwrap().codex.logged_in != Some(true) {
+        app.refresh_codex_status().await;
+        let c = app.status.lock().unwrap().codex.clone();
+        if !c.found {
+            bail!("这台 Mac 上没有找到 Codex，请先安装 Codex CLI");
+        }
+        if c.logged_in == Some(false) {
+            bail!("Codex 还没有登录，请在 Mac 菜单栏的 LoopMe 面板里点“登录”");
+        }
+    }
     let client = ensure_codex(app).await?;
     let started = Instant::now();
 
@@ -446,6 +456,7 @@ async fn run_turn(
     let mut out = TurnOutput { controls: vec![], last_text: String::new(), message_ids: vec![] };
     // itemId -> (message id, raw text, last emit)
     let mut streams: HashMap<String, (Option<String>, String, Instant)> = HashMap::new();
+    let mut last_error: Option<String> = None;
     let mut events = client.events.lock().await;
     loop {
         let ev = tokio::time::timeout(Duration::from_secs(6 * 3600), events.recv())
@@ -538,7 +549,12 @@ async fn run_turn(
                         let status = params.pointer("/turn/status").and_then(Value::as_str).unwrap_or("completed");
                         match status {
                             "failed" => {
-                                let msg = params.pointer("/turn/error/message").and_then(Value::as_str).unwrap_or("未知错误");
+                                let msg = params
+                                    .pointer("/turn/error/message")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string)
+                                    .or(last_error)
+                                    .unwrap_or_else(|| "未知错误".into());
                                 bail!("{msg}");
                             }
                             "interrupted" => {
@@ -550,7 +566,11 @@ async fn run_turn(
                     }
                     "error" => {
                         let msg = params.pointer("/error/message").and_then(Value::as_str).unwrap_or("");
-                        tracing::warn!("codex error notification: {msg}");
+                        let retry = params.get("willRetry").and_then(Value::as_bool).unwrap_or(false);
+                        tracing::warn!("codex error (willRetry={retry}): {msg}");
+                        if !retry && !msg.is_empty() {
+                            last_error = Some(msg.to_string());
+                        }
                     }
                     _ => {}
                 }

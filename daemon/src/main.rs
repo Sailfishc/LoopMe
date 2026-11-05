@@ -51,6 +51,8 @@ async fn main() -> Result<()> {
 
     let (app, runs) = App::new(&data_dir, port)?;
     app.ensure_local_client()?;
+    let pid_file = data_dir.join("daemon.pid");
+    std::fs::write(&pid_file, std::process::id().to_string())?;
     tracing::info!("data dir {}", data_dir.display());
 
     tokio::spawn(loopme::engine::run_worker(app.clone(), runs));
@@ -68,5 +70,6 @@ async fn main() -> Result<()> {
     tracing::info!("shutting down");
     // Dropping the codex client kills the app-server child.
     *app.engine.codex.lock().await = None;
+    let _ = std::fs::remove_file(&pid_file);
     Ok(())
 }

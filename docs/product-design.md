@@ -87,3 +87,12 @@ Profile、MemoryEntry（状态为 active / locked / deleted，删除时保留墓
 2. **P1 桌面单机 Agent**：菜单栏面板 + daemon + 对话、记忆、事项、定时唤醒、权限与停止。
 3. **P2 手机入口**：配对、iOS 三个页面、推送、同步与去重、离线缓存、加密通知摘要。
 4. **P3 打磨**：通知快捷操作、调整频率参数、事项自动收尾、丢机流程。
+
+## 10. v0 实现说明（2026-11-05）
+
+第一版源码已按本文实现，以下几处为了能尽快在本地构建联调，先做了简化，细节见 [architecture.md](architecture.md)：
+
+- 网络层先用“手机经 VPN/局域网直连 Mac 的 WebSocket + 应用层端到端加密”（X25519 + HKDF + ChaCha20-Poly1305，4 位校验码配对），iroh 和内网 relay 后续替换传输层即可。
+- daemon 先由菜单栏 App 以子进程方式启动，LaunchAgent 后续再做。
+- iOS 端用 CryptoKit 实现同一套加密，暂不通过 UniFFI 复用 Rust 核心。
+
