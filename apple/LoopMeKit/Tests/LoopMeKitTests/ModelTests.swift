@@ -21,11 +21,14 @@ final class ModelTests: XCTestCase {
         let status = """
         {"macName":"Mac","daemonVersion":"0.1.0","codex":{"found":true,"path":"/c","version":"0.166.0","loggedIn":true,"error":null},
          "agent":"working","currentRun":{"id":"run_1","title":"修测试","startedAt":1,"step":"运行 pytest -q","messageId":"msg_1"},
-         "atDesk":false,"hooks":"on","pushConfigured":false,"listenPort":7788,"hosts":["127.0.0.1"]}
+         "atDesk":false,"hooks":"on","pushConfigured":false,"listenPort":7788,"hosts":["127.0.0.1"],
+         "relay":"on","relayPort":8443,"relayFingerprint":null}
         """
         let s = try JSONDecoder().decode(Status.self, from: Data(status.utf8))
         XCTAssertEqual(s.currentRun?.step, "运行 pytest -q")
         XCTAssertEqual(s.hooks, "on")
+        XCTAssertEqual(s.relay, "on")
+        XCTAssertEqual(s.relayPort, 8443)
 
         let session = """
         {"id":"s1","cwd":"/r","title":"修一下登录测试","branch":"fix-login","state":"working","lastPrompt":"修一下登录测试",

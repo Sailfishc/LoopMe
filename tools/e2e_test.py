@@ -14,6 +14,7 @@ def fire_hook(daemon, data, payload, wait=True):
     """Runs the daemon binary the way Codex runs a hook."""
     p = subprocess.Popen([daemon, "hook", "--loopme-data-dir", data], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     p.stdin.write(json.dumps(payload)); p.stdin.close()
+    p.stdin = None  # communicate() must not flush the pipe we already closed.
     if wait:
         p.wait(10)
     return p
@@ -242,6 +243,7 @@ async def main():
 
         # Revoke -> phone is disconnected and cannot reconnect.
         await mac.call("devices.revoke", {"deviceId": phone_state["deviceId"]})
+        await phone.wait_event(lambda e: e["event"] == "unpaired", 5)
         await asyncio.sleep(0.3)
         try:
             await lc.connect_state(phone_state); raise AssertionError("revoked device connected")

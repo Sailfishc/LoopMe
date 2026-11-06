@@ -192,6 +192,8 @@ async fn session<S: Io>(app: Arc<App>, mut ws: Ws<S>) -> Result<()> {
             tokio::select! {
                 k = kicks.recv() => {
                     if matches!(k, Ok(ref id) if *id == device.id) {
+                        // Tell this authenticated client to forget its credentials before closing.
+                        let _ = out_tx.send(json!({"event": "unpaired", "seq": 0, "data": null}));
                         return Ok(());
                     }
                 }

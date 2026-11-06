@@ -99,6 +99,7 @@ public final class LoopMeStore: ObservableObject {
         outgoing = []
         replyTo = nil
         hasSynced = false
+        lastError = nil
         saveCredentials?(nil)
     }
 
@@ -181,6 +182,8 @@ public final class LoopMeStore: ObservableObject {
             if let s = decode(CodexSession.self, data) { sessions[s.id] = s }
         case "pairing":
             if let p = decode(PairingState.self, data) { pairing = p }
+        case "unpaired":
+            forget()
         case "resync":
             Task { await sync() }
         default:
@@ -378,7 +381,8 @@ public final class LoopMeStore: ObservableObject {
 
     /// Removes this phone on the Mac, then forgets the pairing locally.
     public func unpair() async {
-        if isConnected { _ = await run("device.unpair") }
+        // Revocation can close this connection before the RPC response arrives.
+        if isConnected { _ = try? await conn.call("device.unpair") }
         forget()
     }
 

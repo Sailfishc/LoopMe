@@ -20,14 +20,17 @@ public struct SettingsForm: View {
     public var body: some View {
         Form {
             macSection
-            permissionSection
-            codexSessionsSection
-            notifySection
-            chatSection
-            Section("记忆与 Profile") {
-                NavigationLink("记忆") { MemoryView() }
-                NavigationLink("Profile") { ProfileView() }
+            Group {
+                permissionSection
+                codexSessionsSection
+                notifySection
+                chatSection
+                Section("记忆与 Profile") {
+                    NavigationLink("记忆") { MemoryView() }
+                    NavigationLink("Profile") { ProfileView() }
+                }
             }
+            .disabled(!store.isConnected && !store.hasSynced)
             Section("外观与语言") {
                 Picker("外观", selection: $appearance) {
                     Text("深色").tag("dark")
@@ -39,6 +42,7 @@ public struct SettingsForm: View {
                     Text("中文").tag("中文")
                     Text("English").tag("English")
                 }
+                .disabled(!store.isConnected && !store.hasSynced)
             }
             if let onUnpair {
                 Section {
@@ -52,7 +56,6 @@ public struct SettingsForm: View {
             }
         }
         .formStyle(.grouped)
-        .disabled(!store.isConnected && !store.hasSynced)
     }
 
     private func binding<T>(_ get: @escaping () -> T, _ set: @escaping (T) -> Void) -> Binding<T> {
@@ -71,6 +74,7 @@ public struct SettingsForm: View {
             row("Codex", codexText)
             row("Agent", agentText)
             Toggle("暂停主动工作", isOn: binding({ store.settings.paused }, { v in store.updateSettings(["paused": v]) }))
+                .disabled(!store.isConnected && !store.hasSynced)
         }
     }
 

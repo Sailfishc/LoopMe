@@ -8,7 +8,7 @@ import AppKit
 /// The single conversation stream with item and decision cards.
 public struct ChatView: View {
     @EnvironmentObject var store: LoopMeStore
-    @State private var draft = ""
+    @State private var draft = ComposerDraft()
     @State private var nowExpanded = false
     @State private var selecting: Message?
     @State private var diagnosing = false
@@ -182,8 +182,11 @@ public struct ChatView: View {
     }
 
     private var inputRow: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            TextField("和 Agent 说点什么", text: $draft, axis: .vertical)
+        let inputID = draft.inputID
+        let text = Binding(get: { draft.text }, set: { draft.edit($0, from: inputID) })
+        return HStack(alignment: .bottom, spacing: 10) {
+            TextField("和 Agent 说点什么", text: text, axis: .vertical)
+                .id(inputID)
                 .textFieldStyle(.plain)
                 .lineLimit(1...6)
                 .focused($inputFocused)
@@ -192,7 +195,7 @@ public struct ChatView: View {
                 .background(Theme.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(Theme.border, lineWidth: 1))
                 .onSubmit(send)
-            if store.isWorking && draft.isEmpty {
+            if store.isWorking && draft.text.isEmpty {
                 Button(action: { store.stopRun() }) {
                     Image(systemName: "stop.circle.fill").font(.system(size: 30))
                 }
@@ -212,12 +215,28 @@ public struct ChatView: View {
     }
 
     private var canSend: Bool {
-        store.isConnected && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        store.isConnected && !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func send() {
         guard canSend else { return }
-        if store.send(draft) { draft = "" }
+        if store.send(draft.text) { draft.sent() }
+    }
+}
+
+/// A native input may report one final edit after sending; retain the input identity with each edit.
+struct ComposerDraft {
+    private(set) var text = ""
+    private(set) var inputID = UUID()
+
+    mutating func edit(_ value: String, from inputID: UUID) {
+        guard inputID == self.inputID else { return }
+        text = value
+    }
+
+    mutating func sent() {
+        text = ""
+        inputID = UUID()
     }
 }
 

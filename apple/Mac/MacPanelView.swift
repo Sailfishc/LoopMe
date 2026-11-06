@@ -230,10 +230,10 @@ struct MacPanelView: View {
 
     private var toggles: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Toggle("插电时保持唤醒", isOn: $keepAwake.enabled)
-            Toggle("暂停主动工作", isOn: Binding(get: { store.settings.paused }, set: { v in store.updateSettings(["paused": v]) }))
+            toggleRow("插电时保持唤醒", isOn: $keepAwake.enabled)
+            toggleRow("暂停主动工作", isOn: Binding(get: { store.settings.paused }, set: { v in store.updateSettings(["paused": v]) }))
                 .disabled(!store.isConnected)
-            Toggle("登录时启动", isOn: Binding(get: { launchAtLogin }, set: { v in
+            toggleRow("登录时启动", isOn: Binding(get: { launchAtLogin }, set: { v in
                 do {
                     if v { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
                 } catch {
@@ -246,6 +246,14 @@ struct MacPanelView: View {
         .controlSize(.small)
         .font(.subheadline)
         .foregroundStyle(Theme.text)
+    }
+
+    private func toggleRow(_ title: String, isOn: Binding<Bool>) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Toggle(title, isOn: isOn).labelsHidden()
+        }
     }
 
     private var footer: some View {

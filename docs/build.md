@@ -31,10 +31,10 @@ python3 ../tools/e2e_test.py          # 配对、对话、事项、记忆、审�
 
 ## 2. 生成 Xcode 工程
 
-1. 打开 `apple/project.yml`，修改三处：
-   - `settings.base.DEVELOPMENT_TEAM`：你的 Team ID（Xcode → Settings → Accounts 里可以看到）。
-   - `LoopMe` 目标的 `PRODUCT_BUNDLE_IDENTIFIER`（默认 `com.example.loopme.ios`）。
-   - `LoopMeMac` 目标的 `PRODUCT_BUNDLE_IDENTIFIER`（默认 `com.example.loopme.mac`）。
+1. 打开 `apple/project.yml`，检查签名配置：
+   - iOS 已固定为现有团队 `35KYWWD972` 和 `com.sailfishc.loopme.ios`，与真机配对和 APNs topic 保持一致。
+   - Mac 目标也使用团队 `35KYWWD972`，分发时选择该团队的 Developer ID Application 签名。
+   - `LoopMeMac` 目标的 `PRODUCT_BUNDLE_IDENTIFIER` 为 `com.sailfishc.loopme.mac`。
 2. 生成工程：
 
 ```bash
@@ -45,7 +45,7 @@ open LoopMe.xcodeproj
 
 工程里有两个 scheme：`LoopMe`（iOS）和 `LoopMeMac`（菜单栏 App）。共享代码在本地 Swift 包 `apple/LoopMeKit` 里。
 
-> 说明：这些 Swift 代码是在没有 Xcode 的环境里写的，**没有经过编译器检查**。第一次构建如果有编译错误，大概率是小问题（类型推断、API 名称），可以直接把报错发给我。Rust daemon 和协议已经过完整测试。
+> 本机构建和真机验收记录保存在忽略的 `apple/build/validation.md`；源码构建成功和 TestFlight 可供安装是不同的验收步骤。
 
 ## 3. Mac 菜单栏 App
 
@@ -73,7 +73,7 @@ xcrun stapler staple "$APP"
 
 - 选 `LoopMe` scheme，连上 iPhone，Run。需要 iOS 17+。
 - 第一次需要在 Signing & Capabilities 里确认 Push Notifications 能力已打开（`aps-environment` 已写在 `apple/iOS/LoopMe.entitlements`）。
-- TestFlight：Product → Archive → Distribute App → TestFlight & App Store。Release 构建会以 `production` 环境注册推送。
+- TestFlight：见 [Internal TestFlight releases](testflight.md)。Release 构建会以 `production` 环境注册推送。
 
 ## 5. 推送（Mac 直接调 APNs）
 

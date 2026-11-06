@@ -37,6 +37,11 @@ daemon/target/
 # Xcode
 apple/*.xcodeproj/
 apple/build/
+# XcodeGen outputs configured in apple/project.yml
+apple/Mac/Info.plist
+apple/Mac/LoopMe.entitlements
+apple/iOS/Info.plist
+apple/iOS/LoopMe.entitlements
 DerivedData/
 *.xcuserstate
 __pycache__/
