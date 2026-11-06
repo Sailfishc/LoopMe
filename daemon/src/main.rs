@@ -24,6 +24,14 @@ fn default_data_dir() -> PathBuf {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `loopme-daemon hook --loopme-data-dir DIR`: run by Codex as a hook (see hooks.rs).
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("hook") {
+        let dir = argv.iter().position(|a| a == "--loopme-data-dir").and_then(|i| argv.get(i + 1)).map(PathBuf::from).unwrap_or_else(default_data_dir);
+        loopme::hooks::hook_main(&dir);
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();

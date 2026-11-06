@@ -18,14 +18,18 @@ const PAIRING_TTL_MS: i64 = 5 * 60 * 1000;
 
 #[derive(Debug, Clone)]
 pub enum RunKind {
-    /// A user chat message.
-    Chat { text: String },
+    /// A user chat message, optionally replying to an earlier message.
+    Chat { text: String, reply_to: Option<String> },
     /// The user's answer to a question the agent asked.
     Answer { decision_id: String, approved: bool },
     /// A scheduled check of one item.
     Item { item_id: String },
     /// Morning brief; `manual` posts even when there is little to say.
     Brief { manual: bool },
+    /// A signal from one of the user's own Codex sessions (`stopped` or `stalled`).
+    Session { session_id: String, reason: String },
+    /// The user tapped 让我来 on an offer card.
+    Takeover { message_id: String },
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +100,7 @@ impl App {
             mac_name: mac_name(),
             daemon_version: VERSION.into(),
             agent: "idle".into(),
+            hooks: "off".into(),
             push_configured: notifier.configured(),
             listen_port: port,
             hosts: advertised_hosts(),
@@ -166,8 +171,51 @@ impl App {
         if settings.paused && s.agent == "idle" {
             s.agent = "paused".into();
         }
-        s.next_wake_at = crate::scheduler::next_wake(self, &settings);
         s
+    }
+
+    pub fn at_desk(&self) -> bool {
+        self.status.lock().unwrap().at_desk
+    }
+
+    /// Updates presence; returns true when the user just arrived at the Mac.
+    pub fn set_at_desk(&self, at_desk: bool) -> bool {
+        let arrived = {
+            let mut s = self.status.lock().unwrap();
+            let arrived = at_desk && !s.at_desk;
+            let changed = s.at_desk != at_desk;
+            s.at_desk = at_desk;
+            if !changed {
+                return false;
+            }
+            arrived
+        };
+        self.emit_status();
+        arrived
+    }
+
+    pub fn set_hooks_status(&self, hooks: &str) {
+        {
+            let mut s = self.status.lock().unwrap();
+            if s.hooks == hooks {
+                return;
+            }
+            s.hooks = hooks.into();
+        }
+        self.emit_status();
+    }
+
+    /// Shows what the current run is doing (the "现在" bar's 正在做 line).
+    pub fn set_run_step(&self, step: &str) {
+        {
+            let mut s = self.status.lock().unwrap();
+            let Some(run) = s.current_run.as_mut() else { return };
+            if run.step.as_deref() == Some(step) {
+                return;
+            }
+            run.step = Some(step.into());
+        }
+        self.emit_status();
     }
 
     pub fn set_agent_state(&self, agent: &str, run: Option<RunInfo>) {
@@ -206,6 +254,7 @@ impl App {
             settings: self.store.settings()?,
             status: self.status(),
             devices: self.devices(),
+            sessions: self.store.sessions_since(now_ms() - crate::sessions::RECENT_MS)?,
         })
     }
 

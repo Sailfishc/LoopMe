@@ -178,6 +178,11 @@ pub async fn notify(app: &App, kind: &str, item_id: Option<&str>, title: &str, b
     if app.store.insert_notification(&n).is_err() {
         return;
     }
+    // At the Mac the menu bar and the "现在" bar already show it; the phone stays quiet.
+    if app.at_desk() {
+        let _ = app.store.set_notification_status(&n.id, "local");
+        return;
+    }
     if in_quiet_hours(&settings, chrono::Local::now()) {
         return; // delivered by `flush` after quiet hours
     }

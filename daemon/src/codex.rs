@@ -45,7 +45,9 @@ impl CodexClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .kill_on_drop(true)
+            // Hooks fired by LoopMe's own Codex turns are ignored.
+            .env(crate::hooks::INTERNAL_ENV, "1");
         // Make sure a login shell PATH is visible (node, git, etc. for the agent).
         if let Some(path) = login_path() {
             cmd.env("PATH", path);

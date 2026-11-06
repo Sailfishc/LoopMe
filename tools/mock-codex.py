@@ -6,10 +6,13 @@ Behaviour of `turn/start`, based on the user's text:
   * contains "盯"     -> replies and creates an item via the control block
   * contains "命令"   -> asks for a command approval first, then reports the answer
   * contains "问我"   -> asks the user a question (decision)
-  * anything else     -> echoes the text
+  * a signal from the user's own session ("主动观察") -> offers to take over
+  * a takeover ("让我来") -> writes loopme-fix.txt in the worktree and reports
+  * anything else     -> echoes the text (including any quoted reply context)
+Also answers `hooks/list` and `config/batchWrite` from $CODEX_HOME/hooks.json.
 Point LoopMe at it with LOOPME_CODEX=/path/to/mock-codex.py.
 """
-import json, sys, threading, time, uuid
+import hashlib, json, os, re, sys, threading, time, uuid
 
 if len(sys.argv) > 1 and sys.argv[1] == "--version":
     print("codex-cli 0.0.0-mock"); sys.exit(0)
@@ -41,11 +44,61 @@ def stream(thread, turn, item, text):
     send({"method": "item/completed", "params": {"threadId": thread, "turnId": turn, "completedAtMs": int(time.time()*1000),
           "item": {"type": "agentMessage", "id": item, "text": text, "phase": None}}})
 
+CODEX_HOME = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+TRUST = os.path.join(CODEX_HOME, "mock-trust.json")
+
+def load_trust():
+    try:
+        return json.load(open(TRUST))
+    except Exception:
+        return {}
+
+def hooks_list():
+    path = os.path.join(CODEX_HOME, "hooks.json")
+    try:
+        cfg = json.load(open(path))
+    except Exception:
+        cfg = {}
+    trust, out = load_trust(), []
+    snake = lambda e: re.sub(r"(?<!^)([A-Z])", r"_\1", e).lower()
+    for event, groups in (cfg.get("hooks") or {}).items():
+        for gi, g in enumerate(groups):
+            for hi, h in enumerate(g.get("hooks", [])):
+                key = f"{path}:{snake(event)}:{gi}:{hi}"
+                cur = "sha256:" + hashlib.sha256(json.dumps(h, sort_keys=True).encode()).hexdigest()
+                t = trust.get(key)
+                out.append({"key": key, "eventName": event[0].lower() + event[1:], "command": h.get("command"), "handlerType": "command",
+                            "currentHash": cur, "trustStatus": "trusted" if t == cur else ("modified" if t else "untrusted")})
+    return {"data": [{"cwd": os.getcwd(), "hooks": out, "warnings": [], "errors": []}]}
+
+def batch_write(params):
+    trust = load_trust()
+    for e in params.get("edits", []):
+        m = re.match(r'hooks\.state\.(".*")\.trusted_hash$', e["keyPath"])
+        if m:
+            trust[json.loads(m.group(1))] = e["value"]
+    os.makedirs(CODEX_HOME, exist_ok=True)
+    json.dump(trust, open(TRUST, "w"))
+    return {"status": "ok", "version": "mock", "filePath": os.path.join(CODEX_HOME, "config.toml")}
+
 def run_turn(thread, turn, text):
     send({"method": "turn/started", "params": {"threadId": thread, "turn": {"id": turn, "status": "inProgress"}}})
     item = "msg_" + uuid.uuid4().hex[:8]
     user = text.split("用户：")[-1]
-    if "主动检查" in text:
+    if "主动观察" in text:
+        cwd = re.search(r"- 目录：([^\n（]+)", text).group(1).strip()
+        sid = re.search(r"- 会话 id：(\S+)", text).group(1)
+        offer = {"kind": "takeover", "title": "修好 fix-login 的 2 个失败测试", "detail": "你的会话停在 2 个测试失败。",
+                 "why": "pytest: 2 failed", "cwd": cwd, "sessionId": sid, "task": "修复测试并运行 pytest"}
+        reply = "fix-login 停在 2 个测试失败，我可以接手。<loopme>" + json.dumps({"notify": True, "offers": [offer]}, ensure_ascii=False) + "</loopme>"
+    elif "让我来" in text:
+        wt = re.search(r"worktree (\S+) 里工作", text).group(1)
+        send({"method": "item/started", "params": {"threadId": thread, "turnId": turn, "item": {"type": "commandExecution", "id": "c1", "command": "pytest -q"}}})
+        time.sleep(0.3)
+        with open(os.path.join(wt, "loopme-fix.txt"), "w") as f:
+            f.write("fix\n")
+        reply = "改了 auth/session.ts 的过期判断，pytest 全部通过。<loopme>{\"notify\":true}</loopme>"
+    elif "主动检查" in text:
         reply = "CI 还在跑，没有变化。<loopme>{\"notify\":false,\"items\":[{\"op\":\"checked\",\"id\":\"%s\",\"changed\":false,\"nextCheckInMinutes\":90}]}</loopme>" % (
             text.split("事项 [")[1].split("]")[0] if "事项 [" in text else "")
     elif "命令" in user:
@@ -61,7 +114,8 @@ def run_turn(thread, turn, text):
     elif "问我" in user:
         reply = "这个需要你拍板。<loopme>{\"notify\":true,\"decision\":{\"title\":\"现在合并 PR 吗？\",\"detail\":\"CI 已通过\"}}</loopme>"
     else:
-        reply = "收到：" + user.strip()[:200] + "<loopme>{\"notify\":false}</loopme>"
+        quoted = "（引用：" + text.split("用户在回复你之前的这条消息：「")[1].split("」")[0][:40] + "）" if "用户在回复你之前的这条消息" in text else ""
+        reply = "收到：" + user.strip()[:200] + quoted + "<loopme>{\"notify\":false}</loopme>"
     stream(thread, turn, item, reply)
     send({"method": "turn/completed", "params": {"threadId": thread, "turn": {"id": turn, "status": "completed", "error": None, "items": []}}})
 
@@ -92,6 +146,10 @@ for line in sys.stdin:
         text = "".join(i.get("text", "") for i in params.get("input", []))
         send({"id": rid, "result": {"turn": {"id": turn, "status": "inProgress", "items": []}}})
         threading.Thread(target=run_turn, args=(params["threadId"], turn, text), daemon=True).start()
+    elif m == "hooks/list":
+        send({"id": rid, "result": hooks_list()})
+    elif m == "config/batchWrite":
+        send({"id": rid, "result": batch_write(params)})
     elif m == "turn/interrupt":
         send({"id": rid, "result": {}})
     else:

@@ -17,6 +17,24 @@ pub struct Control {
     pub items: Vec<ItemOp>,
     pub memory: Vec<MemoryOp>,
     pub decision: Option<QuestionOp>,
+    /// Actionable cards: something the agent can take over, or a one-line heads-up.
+    pub offers: Vec<OfferOp>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OfferOp {
+    /// `takeover` (the agent can do it if the user taps 让我来) or `info`.
+    pub kind: String,
+    pub title: String,
+    pub detail: String,
+    /// Evidence: what the agent saw (shown behind 看依据).
+    pub why: Option<String>,
+    pub session_id: Option<String>,
+    /// The repository to work in (required for takeover).
+    pub cwd: Option<String>,
+    /// Exact instructions for the takeover run.
+    pub task: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -108,6 +126,15 @@ mod tests {
         assert!(c.notify);
         assert_eq!(c.items[0].title.as_deref(), Some("PR #12"));
         assert_eq!(next_check_ms(&c.items[0], 0), Some(3_600_000));
+    }
+
+    #[test]
+    fn split_reads_offers() {
+        let t = r#"x<loopme>{"offers":[{"kind":"takeover","title":"修测试","detail":"2 个失败","cwd":"/r","task":"修复并跑测试","sessionId":"s1"}]}</loopme>"#;
+        let (_, c) = split(t);
+        let o = &c.unwrap().offers[0];
+        assert_eq!(o.kind, "takeover");
+        assert_eq!(o.session_id.as_deref(), Some("s1"));
     }
 
     #[test]

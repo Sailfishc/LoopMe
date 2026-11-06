@@ -63,7 +63,28 @@ CREATE TABLE IF NOT EXISTS notifications (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, item_id TEXT, title TEXT NOT NULL, body TEXT NOT NULL,
   payload TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, sent_at INTEGER);
 CREATE TABLE IF NOT EXISTS codex_threads (id TEXT PRIMARY KEY, purpose TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS user_sessions (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at INTEGER NOT NULL);
 "#;
+
+/// Columns added after v0: (table, column, type).
+const MIGRATIONS: &[(&str, &str, &str)] = &[
+    ("messages", "reply_to", "TEXT"),
+    ("messages", "feedback", "TEXT"),
+    ("messages", "offer", "TEXT"),
+    ("items", "interval_min", "INTEGER"),
+];
+
+fn migrate(conn: &Connection) -> Result<()> {
+    for (table, col, ty) in MIGRATIONS {
+        let exists: bool = conn
+            .prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"))?
+            .exists([col])?;
+        if !exists {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {col} {ty}"))?;
+        }
+    }
+    Ok(())
+}
 
 fn message_from(r: &Row) -> rusqlite::Result<Message> {
     Ok(Message {
@@ -75,9 +96,12 @@ fn message_from(r: &Row) -> rusqlite::Result<Message> {
         decision_id: r.get(5)?,
         created_at: r.get(6)?,
         streaming: r.get::<_, i64>(7)? != 0,
+        reply_to: r.get(8)?,
+        feedback: r.get(9)?,
+        offer: r.get::<_, Option<String>>(10)?.and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
-const MSG_COLS: &str = "id, seq, role, text, item_id, decision_id, created_at, streaming";
+const MSG_COLS: &str = "id, seq, role, text, item_id, decision_id, created_at, streaming, reply_to, feedback, offer";
 
 fn item_from(r: &Row) -> rusqlite::Result<Item> {
     Ok(Item {
@@ -92,10 +116,11 @@ fn item_from(r: &Row) -> rusqlite::Result<Item> {
         unchanged_checks: r.get(8)?,
         created_at: r.get(9)?,
         updated_at: r.get(10)?,
+        interval_min: r.get(11)?,
     })
 }
 const ITEM_COLS: &str =
-    "id, title, detail, status, next_check_at, done_when, source, checks, unchanged_checks, created_at, updated_at";
+    "id, title, detail, status, next_check_at, done_when, source, checks, unchanged_checks, created_at, updated_at, interval_min";
 
 fn decision_from(r: &Row) -> rusqlite::Result<Decision> {
     Ok(Decision {
@@ -161,12 +186,14 @@ impl Store {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Self { conn: Mutex::new(conn) })
     }
 
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -244,12 +271,58 @@ impl Store {
             decision_id: decision_id.map(Into::into),
             created_at: now_ms(),
             streaming,
+            reply_to: None,
+            feedback: None,
+            offer: None,
         };
         self.c().execute(
-            &format!("INSERT INTO messages ({MSG_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"),
+            &format!("INSERT INTO messages ({MSG_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, NULL)"),
             params![m.id, m.seq, m.role, m.text, m.item_id, m.decision_id, m.created_at, m.streaming as i64],
         )?;
         Ok(m)
+    }
+
+    /// Sets reply/feedback/offer fields and bumps the message to a new seq.
+    pub fn set_message_extras(&self, id: &str, reply_to: Option<&str>, feedback: Option<&str>, offer: Option<&Offer>) -> Result<Message> {
+        let seq = self.next_seq()?;
+        let offer = offer.map(serde_json::to_string).transpose()?;
+        self.c().execute(
+            "UPDATE messages SET reply_to = ?2, feedback = ?3, offer = ?4, seq = ?5 WHERE id = ?1",
+            params![id, reply_to, feedback, offer, seq],
+        )?;
+        self.get_message(id)?.ok_or_else(|| anyhow!("message not found"))
+    }
+
+    /// Agent messages the user marked 👎 recently (newest first).
+    pub fn disliked_messages(&self, limit: i64) -> Result<Vec<String>> {
+        let c = self.c();
+        let mut st = c.prepare("SELECT text FROM messages WHERE feedback = 'down' ORDER BY created_at DESC LIMIT ?1")?;
+        let v = st.query_map([limit], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(v)
+    }
+
+    // ---- the user's own Codex sessions ----
+
+    pub fn save_session(&self, s: &CodexSession) -> Result<()> {
+        self.c().execute(
+            "INSERT INTO user_sessions (id, data, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
+            params![s.id, serde_json::to_string(s)?, s.updated_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_session(&self, id: &str) -> Result<Option<CodexSession>> {
+        let v: Option<String> = self.c().query_row("SELECT data FROM user_sessions WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+        Ok(v.and_then(|s| serde_json::from_str(&s).ok()))
+    }
+
+    /// Sessions updated since `since`, newest first.
+    pub fn sessions_since(&self, since: i64) -> Result<Vec<CodexSession>> {
+        let c = self.c();
+        let mut st = c.prepare("SELECT data FROM user_sessions WHERE updated_at >= ?1 ORDER BY updated_at DESC")?;
+        let v = st.query_map([since], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(v.iter().filter_map(|s| serde_json::from_str(s).ok()).collect())
     }
 
     /// Updates text and streaming flag; bumps the message to a new seq.
@@ -295,10 +368,11 @@ impl Store {
     pub fn save_item(&self, i: &Item) -> Result<()> {
         self.c().execute(
             &format!(
-                "INSERT INTO items ({ITEM_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                "INSERT INTO items ({ITEM_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(id) DO UPDATE SET title = excluded.title, detail = excluded.detail, status = excluded.status,
                  next_check_at = excluded.next_check_at, done_when = excluded.done_when, source = excluded.source,
-                 checks = excluded.checks, unchanged_checks = excluded.unchanged_checks, updated_at = excluded.updated_at"
+                 checks = excluded.checks, unchanged_checks = excluded.unchanged_checks, updated_at = excluded.updated_at,
+                 interval_min = excluded.interval_min"
             ),
             params![
                 i.id,
@@ -311,7 +385,8 @@ impl Store {
                 i.checks,
                 i.unchanged_checks,
                 i.created_at,
-                i.updated_at
+                i.updated_at,
+                i.interval_min
             ],
         )?;
         Ok(())

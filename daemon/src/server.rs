@@ -263,12 +263,44 @@ async fn handle(ctx: &Ctx, method: &str, p: Value) -> Result<Value> {
                 bail!("消息为空");
             }
             let cid = p.get("clientId").and_then(Value::as_str);
+            let reply_to = p.get("replyTo").and_then(Value::as_str).map(str::to_string);
             idempotent(app, cid, || async {
-                let m = app.post("user", &text, None, None)?;
-                app.queue(RunKind::Chat { text: text.clone() });
+                let mut m = app.store.insert_message("user", &text, None, None, false)?;
+                if let Some(r) = reply_to.as_deref() {
+                    if app.store.get_message(r)?.is_none() {
+                        bail!("引用的消息不存在");
+                    }
+                    m = app.store.set_message_extras(&m.id, Some(r), None, None)?;
+                }
+                app.emit_message(&m);
+                app.queue(RunKind::Chat { text: text.clone(), reply_to: reply_to.clone() });
                 Ok(json!({"messageId": m.id}))
             })
             .await
+        }
+        "message.feedback" => {
+            let m = app.store.get_message(s(&p, "messageId")?)?.ok_or_else(|| anyhow!("找不到这条消息"))?;
+            let value = match p.get("value").and_then(Value::as_str) {
+                Some("up") => Some("up"),
+                Some("down") => Some("down"),
+                None | Some("") => None,
+                Some(other) => bail!("未知反馈 {other}"),
+            };
+            let m = app.store.set_message_extras(&m.id, m.reply_to.as_deref(), value, m.offer.as_ref())?;
+            app.emit_message(&m);
+            Ok(json!(m))
+        }
+        "offer.act" => {
+            let mid = s(&p, "messageId")?.to_string();
+            let action = s(&p, "action")?.to_string();
+            let cid = p.get("clientId").and_then(Value::as_str);
+            idempotent(app, cid, || async { Ok(json!(engine::offer_act(app, &mid, &action).await?)) }).await
+        }
+        "offer.diff" => Ok(json!({"diff": engine::offer_diff(app, s(&p, "messageId")?).await?})),
+        "app.opened" => {
+            // The app came to the foreground: the first time today starts the brief.
+            crate::scheduler::maybe_start_brief(app);
+            Ok(json!({}))
         }
         "run.stop" => {
             engine::stop(app).await?;
@@ -355,19 +387,22 @@ async fn handle(ctx: &Ctx, method: &str, p: Value) -> Result<Value> {
             Ok(json!(profile))
         }
         "settings.update" => {
-            let mut cur = serde_json::to_value(app.store.settings()?)?;
+            let before = app.store.settings()?;
+            let mut cur = serde_json::to_value(&before)?;
             let codex_before = cur.get("codexPath").cloned();
             merge(&mut cur, &p);
             let mut settings: Settings = serde_json::from_value(cur)?;
             if !["readOnly", "workspace", "full"].contains(&settings.permission_level.as_str()) {
                 bail!("未知权限档位");
             }
-            if !local && (p.get("codexPath").is_some() || p.get("workspaceRoots").is_some()) {
+            if !local && (p.get("codexPath").is_some() || p.get("workspaceRoots").is_some() || p.get("ignoredDirs").is_some()) {
                 bail!("这一项只能在 Mac 上修改");
             }
             if !settings.paused {
                 settings.paused_until = None;
             }
+            // Only hooks.enable / hooks.disable change this (they install or remove the hooks).
+            settings.codex_hooks = before.codex_hooks;
             app.store.set_json("settings", &settings)?;
             app.emit("settings", json!(settings));
             app.emit_status();
@@ -402,6 +437,7 @@ async fn handle(ctx: &Ctx, method: &str, p: Value) -> Result<Value> {
         }
         // ---- Mac app only ----
         "pairing.start" | "pairing.cancel" | "pairing.confirm" | "pairing.state" | "devices.revoke" | "status.refresh" | "codex.login" | "brief.now"
+        | "hooks.enable" | "hooks.disable"
             if !local =>
         {
             bail!("只能在 Mac 上操作")
@@ -433,6 +469,20 @@ async fn handle(ctx: &Ctx, method: &str, p: Value) -> Result<Value> {
         "brief.now" => {
             app.queue(RunKind::Brief { manual: true });
             Ok(json!({}))
+        }
+        "hooks.enable" => {
+            // The one-time confirm: install LoopMe's hooks and mark them trusted in Codex.
+            let state = crate::scheduler::enable_hooks(app).await?;
+            Ok(json!({"hooks": state}))
+        }
+        "hooks.disable" => {
+            crate::hooks::uninstall()?;
+            let mut settings = app.store.settings()?;
+            settings.codex_hooks = false;
+            app.store.set_json("settings", &settings)?;
+            app.emit("settings", json!(settings));
+            app.set_hooks_status("off");
+            Ok(json!({"hooks": "off"}))
         }
         other => bail!("未知方法 {other}"),
     }

@@ -23,6 +23,80 @@ pub struct Message {
     pub decision_id: Option<String>,
     pub created_at: i64,
     pub streaming: bool,
+    /// The message this one replies to (quoted as context for the agent).
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    /// The user's reaction to an agent message: `up` or `down`.
+    #[serde(default)]
+    pub feedback: Option<String>,
+    /// Makes the message an actionable card.
+    #[serde(default)]
+    pub offer: Option<Offer>,
+}
+
+/// An actionable card in the chat: every proactive message carries one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Offer {
+    /// `takeover` (the agent can do it), `result` (a takeover finished), `info`.
+    pub kind: String,
+    /// Small label above the title, e.g. 可以接手 / 做完了.
+    pub label: String,
+    pub title: String,
+    pub detail: String,
+    /// Evidence shown behind 看依据.
+    pub why: Option<String>,
+    pub session_id: Option<String>,
+    pub cwd: Option<String>,
+    /// What the agent should do if the user taps 让我来.
+    pub task: Option<String>,
+    /// Set once a takeover started: the new branch, its base and the worktree.
+    pub branch: Option<String>,
+    pub base: Option<String>,
+    pub worktree: Option<String>,
+    pub actions: Vec<OfferAction>,
+    /// `open`, `working`, `done` (result posted), `closed` (user chose).
+    pub state: String,
+    pub chosen: Option<String>,
+    /// One line shown after a choice, e.g. 你选了：我自己来.
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OfferAction {
+    pub id: String,
+    pub label: String,
+    /// `primary`, `secondary` or `plain`.
+    pub style: String,
+}
+
+impl OfferAction {
+    pub fn new(id: &str, label: &str, style: &str) -> Self {
+        Self { id: id.into(), label: label.into(), style: style.into() }
+    }
+}
+
+/// One of the user's own Codex sessions, as seen through Codex hooks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CodexSession {
+    pub id: String,
+    pub cwd: String,
+    pub title: String,
+    pub branch: Option<String>,
+    /// `working`, `waitingApproval`, `idle`, `ended`.
+    pub state: String,
+    pub last_prompt: Option<String>,
+    pub last_message: Option<String>,
+    pub transcript_path: Option<String>,
+    pub started_at: i64,
+    pub updated_at: i64,
+    /// When a merged signal for this session is due for evaluation.
+    pub eval_at: Option<i64>,
+    pub offered_at: Option<i64>,
+    /// The user said 我自己来 / 别管它: no more offers for this session.
+    pub muted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -40,6 +114,9 @@ pub struct Item {
     pub unchanged_checks: i64,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Current check interval in minutes; doubles while nothing changes (capped).
+    #[serde(default)]
+    pub interval_min: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -49,7 +126,9 @@ pub struct Decision {
     pub item_id: Option<String>,
     pub title: String,
     pub detail: String,
-    /// `approval` (a Codex approval request) or `question` (asked by the agent).
+    /// `approval` (a Codex approval request in LoopMe's own run), `sessionApproval`
+    /// (a permission request from the user's own Codex session while they are away),
+    /// `question` (asked by the agent) or `continue`.
     pub kind: String,
     /// `pending`, `approved`, `rejected`, `expired`.
     pub status: String,
@@ -129,6 +208,12 @@ pub struct Settings {
     pub show_steps: bool,
     pub lock_screen_summary: bool,
     pub session_analysis: bool,
+    /// Watch the user's own Codex sessions through Codex hooks (one-time confirm).
+    pub codex_hooks: bool,
+    /// Sessions under these directories are ignored.
+    pub ignored_dirs: Vec<String>,
+    /// While the user is away, their Codex permission requests can be answered from the phone.
+    pub remote_approvals: bool,
     pub codex_path: Option<String>,
     pub model: Option<String>,
     pub limits: Limits,
@@ -150,6 +235,9 @@ impl Default for Settings {
             show_steps: false,
             lock_screen_summary: false,
             session_analysis: true,
+            codex_hooks: false,
+            ignored_dirs: vec![],
+            remote_approvals: true,
             codex_path: None,
             model: None,
             limits: Limits::default(),
@@ -173,6 +261,12 @@ pub struct RunInfo {
     pub id: String,
     pub title: String,
     pub started_at: i64,
+    /// What the run is doing right now (e.g. the command being run).
+    #[serde(default)]
+    pub step: Option<String>,
+    /// The chat message (offer card) this run belongs to.
+    #[serde(default)]
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -184,7 +278,10 @@ pub struct Status {
     /// `idle`, `working`, `paused`, `error`.
     pub agent: String,
     pub current_run: Option<RunInfo>,
-    pub next_wake_at: Option<i64>,
+    /// The user is at the Mac (recent keyboard or mouse input).
+    pub at_desk: bool,
+    /// Codex hooks: `off`, `on`, `untrusted` (needs the one-time confirm again) or `error`.
+    pub hooks: String,
     pub push_configured: bool,
     pub listen_port: u16,
     pub hosts: Vec<String>,
@@ -213,6 +310,8 @@ pub struct Snapshot {
     pub settings: Settings,
     pub status: Status,
     pub devices: Vec<Device>,
+    /// The user's own Codex sessions active in the last day.
+    pub sessions: Vec<CodexSession>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
