@@ -66,7 +66,8 @@ iOS 版走 TestFlight。Mac 版不能上 TestFlight（要求 App 沙盒，而 Lo
 | 文件 | `LoopMe-<版本>-<build>.zip`（ditto 打包、已公证并 staple 的 `LoopMe.app`）、`appcast.xml`（`generate_appcast` 生成并用 EdDSA 签名）、可选的同名 `.txt` 更新说明、`*.delta` 增量包 |
 | 版本号 | 每次发布 `CURRENT_PROJECT_VERSION` 必须变大，Sparkle 只比较它 |
 | 上传顺序 | 先传 zip 和 delta，最后传 `appcast.xml`，避免 App 读到新 appcast 时 zip 还不存在 |
-| 缓存 | `appcast.xml` 在 CDN 上的缓存不要超过 10 分钟（或上传后主动刷新），zip 可以长期缓存（文件名带版本，不会被覆盖） |
+| 覆盖还是保留 | zip / delta 只增不改（文件名带版本号），永久保留；只有 `appcast.xml` 每次覆盖 |
+| 缓存 | zip 可以长期缓存。`appcast.xml` 二选一：① 上传后主动刷新这一个文件的 CDN 缓存，并把它的缓存时间设为 5–10 分钟；② `LOOPME_UPDATE_FEED_URL` 直接指向源站（不经 CDN，文件只有几 KB），`DOWNLOAD_URL_PREFIX` 指向 CDN |
 | 访问 | HTTPS；只需要内网和 VPN 能访问，不要求鉴权（Sparkle 不带凭据） |
 | 接入点 | `release-mac.sh` 的 `UPLOAD_CMD`，执行时环境变量 `UPDATES_DIR` 指向要同步的目录 |
 | 密钥 | Sparkle 私钥只在发版那台 Mac 的钥匙串里（或 `generate_appcast --ed-key-file` 指向的文件，不进仓库） |
