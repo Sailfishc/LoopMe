@@ -12,6 +12,15 @@ public struct ChatView: View {
     @State private var nowExpanded = false
     @State private var selecting: Message?
     @State private var diagnosing = false
+    /// Whether the newest message is on screen.
+    @State private var atBottom = true
+    /// Messages that arrived while scrolled up.
+    @State private var unseen = 0
+    @State private var scrollRequest = 0
+    /// Long agent replies from before this time start folded; newer ones start open. Fixed once, so a new
+    /// reply never folds the one above it (that shift made the list jump).
+    @State private var openFrom: Int64?
+    @State private var showBanner = false
     @FocusState private var inputFocused: Bool
 
     public init() {}
@@ -26,50 +35,73 @@ public struct ChatView: View {
                         if store.messages.isEmpty && store.outgoing.isEmpty {
                             emptyState
                         }
-                        let shown = store.messages.filter(isShown)
-                        let latestAgent = shown.last(where: { $0.role == "agent" })?.id
-                        ForEach(Array(shown.enumerated()), id: \.element.id) { i, m in
-                            MessageRow(message: m, latest: m.id == latestAgent,
-                                       onSelectText: { selecting = $0 }, onReply: { reply(to: $0) })
+                        let rows = chatRows
+                        ForEach(Array(rows.enumerated()), id: \.element.id) { i, row in
+                            rowView(row)
                                 // A new speaker starts a little further down; consecutive blocks sit close.
-                                .padding(.top, i > 0 && shown[i - 1].role != m.role ? 10 : 0)
-                                .id(m.id)
-                        }
-                        ForEach(store.outgoing) { o in
-                            HStack {
-                                Spacer(minLength: 48)
-                                VStack(alignment: .trailing, spacing: 3) {
-                                    if let q = store.message(o.replyTo) { QuoteLine(text: q.text) }
-                                    Text(o.text)
-                                        .padding(.horizontal, 14).padding(.vertical, 10)
-                                        .foregroundStyle(Theme.userText)
-                                        .background(Theme.userBubble.opacity(0.6), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                                    Text("已发送").font(.caption2).foregroundStyle(Theme.secondary)
-                                }
-                            }
-                            .id(o.id)
+                                .padding(.top, i > 0 && rows[i - 1].role != row.role ? 10 : 0)
+                                .id(row.id)
                         }
                         if store.isWorking && store.status.currentRun?.messageId == nil && !nowExpanded {
                             WorkingRow().id("working")
                         }
+                        // Visible ⇔ the user is reading the newest messages; only then do new ones pull the list down.
                         Color.clear.frame(height: 4).id("bottom")
+                            .onAppear { atBottom = true; unseen = 0 }
+                            .onDisappear { atBottom = false }
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
                 }
                 .background(Theme.background)
+                .defaultScrollAnchor(.bottom)
                 #if os(iOS)
                 .scrollDismissesKeyboard(.interactively)
                 #endif
-                .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
+                .overlay(alignment: .bottomTrailing) {
+                    if !atBottom {
+                        Button { scrollToBottom(proxy, animated: true) } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.down")
+                                if unseen > 0 { Text("\(unseen) 条新消息") }
+                            }
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 12).padding(.vertical, 8)
+                            .foregroundStyle(Theme.text)
+                            .background(Theme.card, in: Capsule())
+                            .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(16)
+                        .accessibilityLabel(unseen > 0 ? "\(unseen) 条新消息，回到底部" : "回到底部")
+                        .transition(.opacity)
+                    }
+                }
+                .onAppear {
+                    markOpenFrom()
+                    scrollToBottom(proxy, animated: false)
+                }
+                .onChange(of: store.hasSynced) { _, _ in markOpenFrom() }
+                // A new row: follow it only when already at the bottom (or it's our own message); otherwise count it.
+                .onChange(of: chatRows.last?.id) { _, _ in
+                    if chatRows.last?.role == "user" || atBottom {
+                        scrollToBottom(proxy, animated: true)
+                    } else {
+                        unseen += 1
+                    }
+                }
+                // Streaming text: stay pinned without animating every token (animated scrolls fight each other and bounce).
                 .onChange(of: store.messages.last?.text) { _, _ in
-                    withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                    if atBottom { scrollToBottom(proxy, animated: false) }
                 }
-                .onChange(of: store.messages.count) { _, _ in
-                    withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
-                }
-                .onChange(of: store.outgoing.count) { _, _ in
-                    withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                .onChange(of: scrollRequest) { _, _ in scrollToBottom(proxy, animated: true) }
+                .onChange(of: inputFocused) { _, focused in
+                    // The keyboard shrinks the list; keep the newest message above it.
+                    guard focused, atBottom else { return }
+                    Task {
+                        try? await Task.sleep(nanoseconds: 300_000_000)
+                        scrollToBottom(proxy, animated: true)
+                    }
                 }
             }
             inputBar
@@ -92,6 +124,14 @@ public struct ChatView: View {
                 .transition(.opacity)
             }
         }
+        .task(id: store.isConnected) {
+            if store.isConnected {
+                showBanner = false
+            } else {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                if !Task.isCancelled && !store.isConnected { showBanner = true }
+            }
+        }
         .onChange(of: store.nowSummary == nil) { _, empty in
             if empty { nowExpanded = false }
         }
@@ -109,7 +149,57 @@ public struct ChatView: View {
     }
 
     /// Room for the connection banner and the "现在" bar above the expanded panel.
-    private var nowBarHeight: CGFloat { store.isConnected ? 56 : 92 }
+    private var nowBarHeight: CGFloat { store.isConnected || !showBanner ? 56 : 92 }
+
+    /// One row per message; a message still on its way keeps the same identity once the Mac has it.
+    private var chatRows: [ChatRow] {
+        let shown = store.messages.filter(isShown).map { ChatRow.message($0, key: store.rowKeys[$0.id] ?? $0.id) }
+        return shown + store.outgoing.map(ChatRow.outgoing)
+    }
+
+    @ViewBuilder private func rowView(_ row: ChatRow) -> some View {
+        switch row {
+        case .message(let m, _):
+            MessageRow(message: m, latest: m.createdAt >= (openFrom ?? 0),
+                       onSelectText: { selecting = $0 }, onReply: { reply(to: $0) })
+        case .outgoing(let o):
+            HStack {
+                Spacer(minLength: 48)
+                VStack(alignment: .trailing, spacing: 4) {
+                    UserBubble(text: o.text, quote: store.message(o.replyTo).map { $0.offer?.title ?? $0.text })
+                        .opacity(o.failed ? 0.55 : 1)
+                    if o.failed {
+                        Button { store.resend(o.id) } label: {
+                            Label("没有发出去，点按重试", systemImage: "exclamationmark.circle")
+                                .font(.caption2.weight(.semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.red)
+                        .disabled(!store.isConnected)
+                        .contextMenu {
+                            Button(role: .destructive) { store.discardOutgoing(o.id) } label: { Label("删除", systemImage: "trash") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func markOpenFrom() {
+        guard openFrom == nil, store.hasSynced else { return }
+        openFrom = store.messages.last(where: { $0.role == "agent" })?.createdAt ?? 0
+    }
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
+        unseen = 0
+        if animated {
+            withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+        } else {
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) { proxy.scrollTo("bottom", anchor: .bottom) }
+        }
+    }
 
     /// Suggestions come one at a time; the others wait behind 换一个.
     private func isShown(_ m: Message) -> Bool {
@@ -122,11 +212,14 @@ public struct ChatView: View {
         inputFocused = true
     }
 
+    /// Only after a short grace period: coming back from the lock screen reconnects in about a second,
+    /// and a banner that flashes in and out would push the whole list down and up.
     @ViewBuilder private var connectionBanner: some View {
-        if !store.isConnected {
+        if !store.isConnected && showBanner {
+            let trying = store.connection == .connecting || store.connection == .idle
             HStack(spacing: 6) {
-                if store.connection == .connecting { ProgressView().controlSize(.mini) }
-                Text(store.connection == .connecting ? "正在连接 Mac…" : "Mac 不可达，正在重试。草稿会保留。")
+                if trying { ProgressView().controlSize(.mini) }
+                Text(trying ? "正在连接 Mac…" : "Mac 不可达，正在重试。草稿会保留。")
                     .font(.caption)
                     .lineLimit(1)
                 Spacer()
@@ -220,7 +313,10 @@ public struct ChatView: View {
 
     private func send() {
         guard canSend else { return }
-        if store.send(draft.text) { draft.sent() }
+        if store.send(draft.text) {
+            draft.sent()
+            scrollRequest += 1
+        }
     }
 }
 
@@ -256,7 +352,7 @@ struct WorkingRow: View {
 public struct MessageRow: View {
     @EnvironmentObject var store: LoopMeStore
     let message: Message
-    /// The newest agent reply stays open; older long replies fold to a preview.
+    /// Long replies start open when true (new in this visit), folded otherwise.
     var latest: Bool
     var onSelectText: ((Message) -> Void)?
     var onReply: ((Message) -> Void)?
@@ -283,15 +379,8 @@ public struct MessageRow: View {
         case "user":
             HStack {
                 Spacer(minLength: 48)
-                VStack(alignment: .trailing, spacing: 4) {
-                    if let q = store.message(message.replyTo) { QuoteLine(text: q.offer?.title ?? q.text) }
-                    Text(message.text)
-                        .padding(.horizontal, 14).padding(.vertical, 10)
-                        .foregroundStyle(Theme.userText)
-                        .tint(Theme.userText)
-                        .background(Theme.userBubble, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                        .contextMenu { menu(feedback: false) }
-                }
+                UserBubble(text: message.text, quote: store.message(message.replyTo).map { $0.offer?.title ?? $0.text })
+                    .contextMenu { menu(feedback: false) }
             }
         case "agent":
             VStack(alignment: .leading, spacing: 6) {
@@ -385,6 +474,43 @@ public struct MessageRow: View {
 
     private func markdown(_ s: String) -> AttributedString {
         (try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
+    }
+}
+
+enum ChatRow: Identifiable {
+    case message(Message, key: String)
+    case outgoing(LoopMeStore.OutgoingMessage)
+
+    var id: String {
+        switch self {
+        case .message(_, let key): return key
+        case .outgoing(let o): return o.id
+        }
+    }
+
+    var role: String {
+        switch self {
+        case .message(let m, _): return m.role
+        case .outgoing: return "user"
+        }
+    }
+}
+
+/// The user's own message: right-aligned blue bubble. A message being sent looks the same as a delivered one,
+/// so nothing moves when the Mac confirms it.
+struct UserBubble: View {
+    let text: String
+    var quote: String?
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            if let quote { QuoteLine(text: quote) }
+            Text(text)
+                .padding(.horizontal, 14).padding(.vertical, 10)
+                .foregroundStyle(Theme.userText)
+                .tint(Theme.userText)
+                .background(Theme.userBubble, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        }
     }
 }
 

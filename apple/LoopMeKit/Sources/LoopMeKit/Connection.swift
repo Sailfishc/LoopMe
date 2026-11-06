@@ -7,6 +7,13 @@ public struct RPCError: LocalizedError {
     public var errorDescription: String? { message }
 }
 
+/// The link to the Mac is down (not an answer from the Mac). The connection banner already says so,
+/// so callers should not show it as an error alert.
+public struct ConnectionError: LocalizedError {
+    public var message: String
+    public var errorDescription: String? { message }
+}
+
 enum HandshakeError: LocalizedError {
     case unknownDevice
     case server(String)
@@ -76,7 +83,7 @@ public final class LoopMeConnection {
             // The old socket may be dead on the new route; a ping finds out within seconds.
             let gen = generation
             Task {
-                do { _ = try await self.call("ping") } catch { if gen == self.generation { self.connectionLost("网络变化，重新连接") } }
+                do { _ = try await self.call("ping", timeout: 4) } catch { if gen == self.generation { self.connectionLost("网络变化，重新连接") } }
             }
         } else {
             retryDelay = 1
@@ -100,16 +107,38 @@ public final class LoopMeConnection {
     }
 
     /// Reconnects right away (e.g. when the app comes to the foreground).
+    /// A socket that looks connected may have died while the phone was locked, so it is checked first.
     public func reconnectNow() {
-        guard wantConnected, state != .connected, state != .connecting else { return }
-        retryDelay = 1
-        startConnecting()
+        guard wantConnected else { return }
+        switch state {
+        case .connecting:
+            return
+        case .connected:
+            let gen = generation
+            Task {
+                do { _ = try await self.call("ping", timeout: 4) } catch {
+                    if gen == self.generation { self.connectionLost("重新连接") }
+                }
+            }
+        default:
+            retryDelay = 1
+            startConnecting()
+        }
+    }
+
+    /// The app went to the background (e.g. the phone was locked). iOS freezes the socket soon after,
+    /// so close it now and reconnect cleanly in `reconnectNow()` instead of finding a dead socket later.
+    public func suspend() {
+        guard wantConnected, state != .idle else { return }
+        teardown("已暂停")
+        state = .idle
     }
 
     // MARK: RPC
 
-    public func call(_ method: String, _ params: [String: Any] = [:]) async throws -> Data {
-        guard state == .connected, let sealer else { throw RPCError(message: "未连接到 Mac") }
+    public func call(_ method: String, _ params: [String: Any] = [:], timeout: Double = 30) async throws -> Data {
+        guard state == .connected, let sealer else { throw ConnectionError(message: "未连接到 Mac") }
+        let gen = generation
         let id = UUID().uuidString
         let body = try JSONSerialization.data(withJSONObject: ["id": id, "method": method, "params": params])
         let frame = try sealer.seal(body)
@@ -119,15 +148,26 @@ public final class LoopMeConnection {
                 self?.pending.removeValue(forKey: id)?.resume(throwing: error)
             }
             Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 30_000_000_000)
-                self?.pending.removeValue(forKey: id)?.resume(throwing: RPCError(message: "Mac 没有响应"))
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                guard let self, let c = self.pending.removeValue(forKey: id) else { return }
+                let err: Error = method == "ping" ? ConnectionError(message: "Mac 没有响应") : RPCError(message: "Mac 没有及时响应，稍后再试")
+                c.resume(throwing: err)
+                // Maybe the socket is gone (e.g. it died while the phone was locked): check now instead of at the next ping.
+                guard gen == self.generation, self.state == .connected else { return }
+                if method == "ping" {
+                    self.connectionLost("Mac 没有响应，重新连接")
+                } else {
+                    Task {
+                        do { _ = try await self.call("ping", timeout: 4) } catch {}
+                    }
+                }
             }
         }
     }
 
     /// Calls and decodes the result.
-    public func call<T: Decodable>(_ method: String, _ params: [String: Any] = [:], as type: T.Type) async throws -> T {
-        let data = try await call(method, params)
+    public func call<T: Decodable>(_ method: String, _ params: [String: Any] = [:], as type: T.Type, timeout: Double = 30) async throws -> T {
+        let data = try await call(method, params, timeout: timeout)
         return try JSONDecoder().decode(T.self, from: data)
     }
 
@@ -139,10 +179,10 @@ public final class LoopMeConnection {
         lastSend = Task {
             await prev?.value
             do {
-                guard let ws else { throw RPCError(message: "未连接到 Mac") }
+                guard let ws else { throw ConnectionError(message: "未连接到 Mac") }
                 try await ws.send(.data(frame))
             } catch {
-                onError(error)
+                onError(error is RPCError ? error : ConnectionError(message: error.localizedDescription))
             }
         }
     }
@@ -263,7 +303,7 @@ public final class LoopMeConnection {
             try? await Task.sleep(nanoseconds: 25_000_000_000)
             guard gen == generation, state == .connected else { return }
             do {
-                _ = try await call("ping")
+                _ = try await call("ping", timeout: 10)
             } catch {
                 if gen == generation { connectionLost("与 Mac 的连接中断") }
                 return
@@ -319,7 +359,7 @@ public final class LoopMeConnection {
         lastSend = nil
         let waiting = pending
         pending = [:]
-        for (_, c) in waiting { c.resume(throwing: RPCError(message: reason)) }
+        for (_, c) in waiting { c.resume(throwing: ConnectionError(message: reason)) }
     }
 }
 

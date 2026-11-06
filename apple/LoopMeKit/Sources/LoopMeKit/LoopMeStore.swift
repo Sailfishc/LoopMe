@@ -36,7 +36,12 @@ public final class LoopMeStore: ObservableObject {
         public let text: String
         public let createdAt: Date
         public var replyTo: String? = nil
+        /// The Mac never got it (the link dropped). Tapping the bubble sends it again.
+        public var failed = false
     }
+
+    /// Server message id → the client id of the bubble it replaced, so the row keeps its identity (no jump).
+    @Published public private(set) var rowKeys: [String: String] = [:]
 
     public let conn = LoopMeConnection()
     /// APNs token waiting to be sent to the Mac (sent on every connect).
@@ -97,6 +102,7 @@ public final class LoopMeStore: ObservableObject {
         devices = []
         sessions = [:]
         outgoing = []
+        rowKeys = [:]
         replyTo = nil
         hasSynced = false
         lastError = nil
@@ -107,6 +113,8 @@ public final class LoopMeStore: ObservableObject {
         do {
             let snap = try await conn.call("sync", as: Snapshot.self)
             messages = snap.messages.sorted(by: Self.order)
+            let delivered = Set(messages.compactMap { rowKeys[$0.id] })
+            outgoing.removeAll { delivered.contains($0.id) }
             items = Dictionary(snap.items.map { ($0.id, $0) }, uniquingKeysWith: { _, b in b })
             decisions = Dictionary(snap.decisions.map { ($0.id, $0) }, uniquingKeysWith: { _, b in b })
             memory = snap.memory
@@ -124,8 +132,14 @@ public final class LoopMeStore: ObservableObject {
                 saveCredentials?(c2)
             }
         } catch {
-            lastError = error.localizedDescription
+            report(error)
         }
+    }
+
+    /// Shows an error alert, except for a dropped link: the connection banner already says that.
+    private func report(_ error: Error) {
+        if error is ConnectionError { return }
+        lastError = error.localizedDescription
     }
 
     private static func order(_ a: Message, _ b: Message) -> Bool {
@@ -155,8 +169,11 @@ public final class LoopMeStore: ObservableObject {
                 messages.sort(by: Self.order)
             }
             if m.role == "user" {
-                // The Mac has it now; drop the matching pending bubble.
-                if let i = outgoing.firstIndex(where: { $0.text == m.text }) { outgoing.remove(at: i) }
+                // The Mac has it now; the real message takes the pending bubble's place and identity.
+                if rowKeys[m.id] == nil, let i = outgoing.firstIndex(where: { $0.text == m.text && !$0.failed }) {
+                    rowKeys[m.id] = outgoing[i].id
+                    outgoing.remove(at: i)
+                }
             }
         case "messageDelta":
             guard let d = decode(MessageDelta.self, data), let i = messages.firstIndex(where: { $0.id == d.id }) else { return }
@@ -236,7 +253,7 @@ public final class LoopMeStore: ObservableObject {
         do {
             return try await conn.call(method, params)
         } catch {
-            lastError = error.localizedDescription
+            report(error)
             return nil
         }
     }
@@ -252,12 +269,39 @@ public final class LoopMeStore: ObservableObject {
         if let quoted { params["replyTo"] = quoted }
         outgoing.append(OutgoingMessage(id: clientId, text: t, createdAt: Date(), replyTo: quoted))
         replyTo = nil
+        deliver(clientId, params)
+        return true
+    }
+
+    private func deliver(_ clientId: String, _ params: [String: Any]) {
         Task {
-            if await run("message.send", params) == nil {
-                outgoing.removeAll { $0.id == clientId }
+            do {
+                let data = try await conn.call("message.send", params)
+                let id = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["messageId"] as? String
+                if let id, rowKeys[id] == nil { rowKeys[id] = clientId }
+                // Normally the message event came first and already swapped the bubble; otherwise the next sync does.
+                if let id, message(id) != nil { outgoing.removeAll { $0.id == clientId } }
+            } catch {
+                // Keep the bubble so nothing typed is lost; a tap retries with the same client id (the Mac de-duplicates).
+                if let i = outgoing.firstIndex(where: { $0.id == clientId }) { outgoing[i].failed = true }
+                report(error)
             }
         }
-        return true
+    }
+
+    /// Sends a message that failed to reach the Mac again.
+    public func resend(_ clientId: String) {
+        guard isConnected, let i = outgoing.firstIndex(where: { $0.id == clientId }), outgoing[i].failed else { return }
+        outgoing[i].failed = false
+        let o = outgoing[i]
+        var params: [String: Any] = ["clientId": o.id, "text": o.text]
+        if let r = o.replyTo { params["replyTo"] = r }
+        deliver(o.id, params)
+    }
+
+    /// Drops a message that failed to send.
+    public func discardOutgoing(_ clientId: String) {
+        outgoing.removeAll { $0.id == clientId }
     }
 
     /// 👍 / 👎 on an agent message; the same value again clears it.

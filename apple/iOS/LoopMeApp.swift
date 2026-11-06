@@ -15,8 +15,14 @@ struct LoopMeApp: App {
                 .tint(Theme.text)
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active {
+            switch phase {
+            case .active:
                 delegate.store.conn.reconnectNow()
+            case .background:
+                // Locked or switched away: iOS freezes the socket, so close it cleanly and reconnect on return.
+                delegate.store.conn.suspend()
+            default:
+                break
             }
         }
     }
