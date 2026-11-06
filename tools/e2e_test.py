@@ -51,6 +51,8 @@ async def codex_hooks_flow(daemon, data, codex_home, mac, phone):
     hp = fire_hook(daemon, data, dict(base, hook_event_name="PermissionRequest", turn_id="t1", tool_name="Bash",
                                        tool_input={"command": "npm install --save-dev vitest@3"}), wait=False)
     dec = await phone.wait_event(lambda e: e["event"] == "decision" and e["data"]["kind"] == "sessionApproval", 10)
+    appr = await phone.wait_event(lambda e: e["event"] == "session" and (e["data"].get("attention") or {}).get("kind") == "approval", 10)
+    assert "vitest" in appr["data"]["attention"]["summary"], appr
     assert "vitest" in dec["data"]["title"]
     await phone.call("decision.answer", {"decisionId": dec["data"]["id"], "choice": "approve", "clientId": uuid.uuid4().hex})
     out = hp.communicate(timeout=10)[0]
@@ -63,7 +65,16 @@ async def codex_hooks_flow(daemon, data, codex_home, mac, phone):
     offer = await phone.wait_event(lambda e: e["event"] == "message" and (e["data"].get("offer") or {}).get("kind") == "takeover", 30)
     o = offer["data"]["offer"]
     assert [a["id"] for a in o["actions"]] == ["take", "mine", "ignore"] and o["sessionId"] == "s_user", o
-    print("signal -> takeover offer OK")
+    att = await phone.wait_event(lambda e: e["event"] == "session" and (e["data"].get("attention") or {}).get("kind") == "stuck", 30)
+    a = att["data"]["attention"]
+    assert a["level"] == "interrupt" and a["messageId"] == offer["data"]["id"] and "2 failed" in a["evidence"], a
+    print("signal -> stuck card + takeover offer OK")
+    snoozed = await phone.call("session.snooze", {"sessionId": "s_user"})
+    assert snoozed["attention"]["snoozedUntil"] > 0, snoozed
+    acked = await phone.call("session.ack", {"sessionId": "s_user"})
+    assert acked.get("attention") is None, acked
+    rec = await phone.wait_event(lambda e: e["event"] == "message" and e["data"]["role"] == "system" and "卡住" in e["data"]["text"], 10)
+    print("card snooze + ack OK")
 
     # 让我来 -> work on a separate branch in a worktree -> result card; the user's copy is untouched.
     await phone.call("offer.act", {"messageId": offer["data"]["id"], "action": "take", "clientId": uuid.uuid4().hex})

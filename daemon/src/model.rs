@@ -97,6 +97,34 @@ pub struct CodexSession {
     pub offered_at: Option<i64>,
     /// The user said 我自己来 / 别管它: no more offers for this session.
     pub muted: bool,
+    /// When the current turn started (the last prompt), for the long-task rule.
+    pub turn_started_at: Option<i64>,
+    /// What the user should know about this session now; `None` = nothing to do.
+    pub attention: Option<Attention>,
+    /// The last interrupt sent for this session (kind and time), for the no-repeat rule.
+    pub alerted_kind: Option<String>,
+    pub alerted_at: Option<i64>,
+}
+
+/// A session that needs the user or has a result: one sentence, its evidence, and what can be done.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Attention {
+    /// `approval`, `question`, `stuck` (needs you) or `done`, `milestone` (result).
+    pub kind: String,
+    /// `interrupt` (needs you) or `sync` (result).
+    pub level: String,
+    /// One sentence, e.g. 停在 2 个测试失败，已经重试 3 次.
+    pub summary: String,
+    /// One line of proof: test results, files changed, the command waiting for approval.
+    pub evidence: Option<String>,
+    /// Why it is stuck: `test`, `dependency`, `permission`, `unclear`.
+    pub cause: Option<String>,
+    pub at: i64,
+    /// A takeover offer in the chat for this session (让我来).
+    pub message_id: Option<String>,
+    /// 稍后: hidden until then.
+    pub snoozed_until: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

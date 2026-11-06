@@ -6,7 +6,7 @@ Behaviour of `turn/start`, based on the user's text:
   * contains "盯"     -> replies and creates an item via the control block
   * contains "命令"   -> asks for a command approval first, then reports the answer
   * contains "问我"   -> asks the user a question (decision)
-  * a signal from the user's own session ("主动观察") -> offers to take over
+  * a look at the user's own session ("替用户判断") -> offers to take over
   * a takeover ("让我来") -> writes loopme-fix.txt in the worktree and reports
   * anything else     -> echoes the text (including any quoted reply context)
 Also answers `hooks/list` and `config/batchWrite` from $CODEX_HOME/hooks.json.
@@ -85,12 +85,12 @@ def run_turn(thread, turn, text):
     send({"method": "turn/started", "params": {"threadId": thread, "turn": {"id": turn, "status": "inProgress"}}})
     item = "msg_" + uuid.uuid4().hex[:8]
     user = text.split("用户：")[-1]
-    if "主动观察" in text:
+    if "替用户判断" in text:
         cwd = re.search(r"- 目录：([^\n（]+)", text).group(1).strip()
         sid = re.search(r"- 会话 id：(\S+)", text).group(1)
         offer = {"kind": "takeover", "title": "修好 fix-login 的 2 个失败测试", "detail": "你的会话停在 2 个测试失败。",
                  "why": "pytest: 2 failed", "cwd": cwd, "sessionId": sid, "task": "修复测试并运行 pytest"}
-        reply = "fix-login 停在 2 个测试失败，我可以接手。<loopme>" + json.dumps({"notify": True, "offers": [offer]}, ensure_ascii=False) + "</loopme>"
+        reply = "fix-login 停在 2 个测试失败，我可以接手。<loopme>" + json.dumps({"offers": [offer], "attention": {"kind": "stuck", "summary": "停在 2 个测试失败", "evidence": "pytest: 2 failed in tests/test_login.py", "cause": "test"}}, ensure_ascii=False) + "</loopme>"
     elif "让我来" in text:
         wt = re.search(r"worktree (\S+) 里工作", text).group(1)
         send({"method": "item/started", "params": {"threadId": thread, "turnId": turn, "item": {"type": "commandExecution", "id": "c1", "command": "pytest -q"}}})

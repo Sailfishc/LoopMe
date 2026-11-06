@@ -19,6 +19,19 @@ pub struct Control {
     pub decision: Option<QuestionOp>,
     /// Actionable cards: something the agent can take over, or a one-line heads-up.
     pub offers: Vec<OfferOp>,
+    /// For a look at one of the user's Codex sessions: what (if anything) the user should know.
+    pub attention: Option<AttentionOp>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AttentionOp {
+    /// `stuck`, `question`, `done`, `milestone` or `none`.
+    pub kind: String,
+    pub summary: String,
+    pub evidence: Option<String>,
+    /// For `stuck`: `test`, `dependency`, `permission` or `unclear`.
+    pub cause: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

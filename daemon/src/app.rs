@@ -79,6 +79,8 @@ pub struct App {
     pub notifier: Notifier,
     /// How phones reach this Mac when a relay is used (set once at startup).
     pub relay: Mutex<Option<crate::relay_link::LinkConfig>>,
+    /// When recent interrupts (pushes and Mac banners about sessions) went out, for the hourly and daily caps.
+    pub interrupts: Mutex<Vec<i64>>,
 }
 
 impl App {
@@ -123,6 +125,7 @@ impl App {
             engine: EngineState::default(),
             notifier,
             relay: Mutex::new(None),
+            interrupts: Mutex::new(Vec::new()),
         });
         Ok((app, rx))
     }

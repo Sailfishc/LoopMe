@@ -183,7 +183,8 @@ pub async fn notify(app: &App, kind: &str, item_id: Option<&str>, title: &str, b
         let _ = app.store.set_notification_status(&n.id, "local");
         return;
     }
-    if in_quiet_hours(&settings, chrono::Local::now()) {
+    // Quiet hours hold everything except approvals, which block work.
+    if kind != "decision" && in_quiet_hours(&settings, chrono::Local::now()) {
         return; // delivered by `flush` after quiet hours
     }
     // Per-item daily limit (decisions are exempt: they block work).

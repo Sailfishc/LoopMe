@@ -64,6 +64,62 @@ public struct CodexSession: Codable, Equatable, Hashable, Identifiable {
     public var startedAt: Int64
     public var updatedAt: Int64
     public var muted: Bool
+    public var turnStartedAt: Int64?
+    /// What the user should know about this session now; nil = nothing to do.
+    public var attention: Attention?
+}
+
+/// A session that needs the user (`approval`, `question`, `stuck`) or has a result (`done`, `milestone`).
+public struct Attention: Codable, Equatable, Hashable {
+    public var kind: String
+    /// `interrupt` (needs you) or `sync` (result).
+    public var level: String
+    public var summary: String
+    public var evidence: String?
+    /// For `stuck`: `test`, `dependency`, `permission`, `unclear`.
+    public var cause: String?
+    public var at: Int64
+    /// The takeover offer in the chat (让我来).
+    public var messageId: String?
+    public var snoozedUntil: Int64?
+
+    public var needsYou: Bool { level == "interrupt" }
+
+    public var label: String {
+        switch kind {
+        case "approval": return "等授权"
+        case "question": return "在问你"
+        case "stuck": return "卡住"
+        case "done": return "完成"
+        case "milestone": return "阶段成果"
+        default: return "会话"
+        }
+    }
+
+    public var causeText: String? {
+        switch cause {
+        case "test": return "测试没过"
+        case "dependency": return "缺依赖"
+        case "permission": return "没权限"
+        case "unclear": return "需求不清"
+        default: return nil
+        }
+    }
+}
+
+public extension CodexSession {
+    /// `项目 · 分支`, the name the user knows the session by.
+    var projectName: String {
+        let name = (cwd as NSString).lastPathComponent
+        let base = name.isEmpty ? title : name
+        if let b = branch, !b.isEmpty { return "\(base) · \(b)" }
+        return base
+    }
+
+    /// Automation prompts like `<heartbeat>` are never shown.
+    var isNoise: Bool {
+        title.trimmingCharacters(in: .whitespaces).hasPrefix("<") || (lastPrompt?.trimmingCharacters(in: .whitespaces).hasPrefix("<") ?? false)
+    }
 }
 
 public struct Item: Codable, Identifiable, Equatable, Hashable {

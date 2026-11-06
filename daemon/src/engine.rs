@@ -145,6 +145,7 @@ const BASE_INSTRUCTIONS: &str = r#"你是 LoopMe：住在用户 Mac 上、会主
 - offers（可选）：可以点的卡片，每个元素是以下之一：
   {"kind":"takeover","title":"一句话说要做的事","detail":"现在的情况（一两句）","why":"你看到的依据","sessionId":"会话 id","cwd":"仓库路径","task":"接手后具体要做什么、怎么验证"}
   {"kind":"info","title":"一句话","detail":"补充（可选）"}
+- attention（只在查看用户自己的 Codex 会话时用）：{"kind":"stuck|question|done|milestone|none","summary":"一句话判断","evidence":"一行证据","cause":"test|dependency|permission|unclear"}
 "#;
 
 fn fmt_time(ms: i64) -> String {
@@ -392,6 +393,7 @@ async fn run_one(app: &Arc<App>, kind: &RunKind) -> Result<()> {
     }
     let client = ensure_codex(app).await?;
     let started = Instant::now();
+    let started_ms = now_ms();
 
     if let RunKind::Takeover { message_id } = kind {
         return run_takeover(app, &client, &settings, message_id).await;
@@ -463,18 +465,25 @@ async fn run_one(app: &Arc<App>, kind: &RunKind) -> Result<()> {
             let sess = app.store.get_session(session_id)?.ok_or_else(|| anyhow!("会话不存在"))?;
             env = RunEnv { cwd: Some(sess.cwd.clone()), read_only: true, ..Default::default() };
             let t = start_thread(app, &client, &settings, true, "signal", &env).await?;
+            let minutes = sess.turn_started_at.map(|t| (now_ms() - t) / 60_000);
             let p = format!(
-                "{}这是一次主动观察（用户不在 Mac 前）。用户自己的一个 Codex 会话{}：\n\
-                 - 会话 id：{}\n- 目录：{}{}\n- 最后一次用户输入：{}\n- Codex 最后的回复：{}\n- 会话记录文件：{}\n\n\
-                 先判断值不值得告诉用户（只读查看仓库和会话记录，不要修改任何文件）：\n\
-                 - 如果停在一个你能独立做完的地方（比如测试失败、差一步的修复），用 offers 提一个 takeover：title 一句话说你要做什么，detail 说现在的情况，why 写你看到的依据，cwd 写 {}，sessionId 写 {}，task 写清楚接手后要做什么、怎么验证。notify 为 true。\n\
-                 - 如果只需要用户知道（比如在等用户回答），回复一句话，notify 为 true。\n\
-                 - 如果一切正常或已经完成，notify 为 false，回复一句话即可。",
+                "{}用户自己的一个 Codex 会话{}。你要替用户判断：这件事现在需不需要他知道。用户最在意的是少被打扰，但不能漏掉真正需要他的事。\n\
+                 - 会话 id：{}\n- 项目：{}\n- 目录：{}\n- 这一轮跑了：{}\n- 最后一次用户输入：{}\n- Codex 最后的回复：{}\n- 会话记录文件：{}\n\n\
+                 只读查看会话记录末尾和仓库（可以看 git status / git diff --stat / 测试输出），不要修改任何文件。然后在控制块里给出 attention：\n\
+                 - stuck：Codex 停在一个它自己解决不了的问题上（测试一直失败、缺依赖、没权限、需求不清）。cause 填 test / dependency / permission / unclear。\n\
+                 - question：Codex 在等用户回答一个问题或做一个选择。\n\
+                 - done：用户交代的事做完了，而且有证据（测试通过、改动完成）。\n\
+                 - milestone：长任务完成了一个有意义的阶段，但还没全部做完。\n\
+                 - none：其它情况（正常推进、闲聊、没做完也没卡住、只是回答了问题）。拿不准时选 none。\n\
+                 summary 是一句话的判断（不超过 40 个字，直接说结果或卡在哪，不要以“Codex”开头）。evidence 是一行证据（例如“12 个测试通过，改了 6 个文件”或“npm test 里 2 个失败：auth.spec.ts”）。\n\
+                 如果是 stuck 而且你能独立做完（比如差一步的修复），再用 offers 提一个 takeover：title 一句话说你要做什么，detail 说现在的情况，why 写依据，cwd 写 {}，sessionId 写 {}，task 写清楚接手后要做什么、怎么验证。\n\
+                 回复正文写一句话即可，用户不会在对话里看到它。",
                 context_block(app)?,
                 if reason == "stalled" { "已经 4 个多小时没有动静" } else { "刚刚停下来了" },
                 sess.id,
+                crate::attention::project(&sess),
                 sess.cwd,
-                sess.branch.as_deref().map(|b| format!("（分支 {b}）")).unwrap_or_default(),
+                minutes.map(|m| format!("{m} 分钟")).unwrap_or_else(|| "（不知道）".into()),
                 sess.last_prompt.as_deref().map(|p| truncate(p, 400)).unwrap_or_else(|| "（无）".into()),
                 sess.last_message.as_deref().map(|p| truncate(p, 1200)).unwrap_or_else(|| "（无）".into()),
                 sess.transcript_path.as_deref().unwrap_or("（无）"),
@@ -491,33 +500,55 @@ async fn run_one(app: &Arc<App>, kind: &RunKind) -> Result<()> {
 
     // Wake-ups only show up in the chat when there is something to say.
     let mut shown_id = out.message_ids.last().cloned();
-    let should_show = visible
+    // A look at a Codex session speaks through its card in the "现在" bar, not the chat.
+    let session_look = matches!(kind, RunKind::Session { .. });
+    let should_show = !session_look
+        && (visible
         || merged.notify
         || merged.decision.is_some()
         || !merged.offers.is_empty()
-        || merged.items.iter().any(|o| o.op == "suggest");
+        || merged.items.iter().any(|o| o.op == "suggest"));
     if !visible && should_show && !out.last_text.is_empty() {
         let m = app.post("agent", &out.last_text, item_id.as_deref(), None)?;
         shown_id = Some(m.id);
     }
 
-    apply_control(app, &merged, item_id.as_deref(), shown_id.as_deref()).await?;
+    let offer_ids = apply_control(app, &merged, item_id.as_deref(), shown_id.as_deref()).await?;
 
     if let RunKind::Item { item_id } = kind {
         finish_item_check(app, item_id, &merged, &settings).await?;
     }
 
     if let RunKind::Session { session_id, .. } = kind {
-        if !merged.offers.is_empty() || merged.notify {
-            if let Some(mut s) = app.store.get_session(session_id)? {
-                s.offered_at = Some(now_ms());
-                app.store.save_session(&s)?;
+        if let Some(mut s) = app.store.get_session(session_id)? {
+            // The user picked it up again while we were looking: their own eyes are on it.
+            let answered = s.turn_started_at.is_some_and(|t| t > started_ms);
+            let op = merged.attention.clone().unwrap_or_default();
+            match crate::attention::level_for(&op.kind) {
+                Some(level) if !answered && !op.summary.trim().is_empty() => {
+                    let att = Attention {
+                        kind: op.kind.clone(),
+                        level: level.into(),
+                        summary: truncate(op.summary.trim(), 80),
+                        evidence: op.evidence.clone().filter(|e| !e.trim().is_empty()).map(|e| truncate(e.trim(), 160)),
+                        cause: op.cause.clone().filter(|c| !c.trim().is_empty()),
+                        at: now_ms(),
+                        message_id: offer_ids.last().cloned(),
+                        snoozed_until: None,
+                    };
+                    s.offered_at = Some(now_ms());
+                    crate::attention::raise(app, &mut s, att).await;
+                }
+                _ if !answered => crate::attention::clear(&mut s),
+                _ => {}
             }
+            app.store.save_session(&s)?;
+            app.emit("session", json!(s));
         }
     }
 
     let long_chat = visible && started.elapsed() > Duration::from_secs(60);
-    if (merged.notify || long_chat) && should_show {
+    if (merged.notify || long_chat) && should_show && !session_look {
         let push_kind = match kind {
             RunKind::Brief { .. } => "brief",
             _ => "result",
@@ -536,6 +567,9 @@ fn merge_controls(controls: Vec<Control>) -> Control {
         merged.offers.extend(c.offers);
         if c.decision.is_some() {
             merged.decision = c.decision;
+        }
+        if c.attention.is_some() {
+            merged.attention = c.attention;
         }
     }
     merged
@@ -939,8 +973,10 @@ pub fn apply_memory_op(app: &App, op: &MemoryOp) -> Result<bool> {
 
 const ITEM_STATUSES: &[&str] = &["scheduled", "active", "needsYou", "snoozed", "done", "dropped", "suggested"];
 
-async fn apply_control(app: &Arc<App>, c: &Control, run_item: Option<&str>, message_id: Option<&str>) -> Result<()> {
+/// Applies a control block. Returns the ids of the offer messages it posted.
+async fn apply_control(app: &Arc<App>, c: &Control, run_item: Option<&str>, message_id: Option<&str>) -> Result<Vec<String>> {
     let now = now_ms();
+    let mut offer_ids = Vec::new();
     let mut first_card = true;
     for op in &c.items {
         match op.op.as_str() {
@@ -1060,6 +1096,7 @@ async fn apply_control(app: &Arc<App>, c: &Control, run_item: Option<&str>, mess
         let m = app.store.insert_message("agent", &offer.detail, run_item, None, false)?;
         let m = app.store.set_message_extras(&m.id, None, None, Some(&offer))?;
         app.emit_message(&m);
+        offer_ids.push(m.id.clone());
     }
 
     if let Some(q) = &c.decision {
@@ -1093,7 +1130,7 @@ async fn apply_control(app: &Arc<App>, c: &Control, run_item: Option<&str>, mess
             notify::notify(app, "decision", item_id.as_deref(), &d.title, &d.detail, json!({"decisionId": d.id})).await;
         }
     }
-    Ok(())
+    Ok(offer_ids)
 }
 
 async fn finish_item_check(app: &Arc<App>, item_id: &str, c: &Control, settings: &Settings) -> Result<()> {

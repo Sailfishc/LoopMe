@@ -43,6 +43,9 @@ public final class LoopMeStore: ObservableObject {
     /// Server message id → the client id of the bubble it replaced, so the row keeps its identity (no jump).
     @Published public private(set) var rowKeys: [String: String] = [:]
 
+    /// (title, body, session id) for a Mac banner; only the Mac app sets it.
+    public var onAlert: ((String, String, String) -> Void)?
+
     public let conn = LoopMeConnection()
     /// APNs token waiting to be sent to the Mac (sent on every connect).
     private var pushToken: (token: String, env: String)?
@@ -197,6 +200,12 @@ public final class LoopMeStore: ObservableObject {
             if let d = decode([Device].self, data) { devices = d }
         case "session":
             if let s = decode(CodexSession.self, data) { sessions[s.id] = s }
+        case "alert":
+            // A session needs the user while they are at the Mac: the Mac app shows a banner.
+            if let a = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+               let title = a["title"] as? String, let body = a["body"] as? String {
+                onAlert?(title, body, a["sessionId"] as? String ?? "")
+            }
         case "pairing":
             if let p = decode(PairingState.self, data) { pairing = p }
         case "unpaired":
@@ -240,6 +249,54 @@ public final class LoopMeStore: ObservableObject {
         return sessions.values
             .filter { $0.state != "ended" && $0.updatedAt >= since && !$0.muted }
             .sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    /// Sessions with a card for the "现在" bar (not snoozed, not muted, no automation), newest first.
+    public var attentionSessions: [CodexSession] {
+        let now = nowMillis()
+        return sessions.values
+            .filter { s in
+                guard let a = s.attention, !s.muted, !s.isNoise else { return false }
+                return (a.snoozedUntil ?? 0) <= now
+            }
+            .sorted { ($0.attention?.at ?? 0) > ($1.attention?.at ?? 0) }
+    }
+
+    /// Sessions that need the user. An approval already shown as a decision on the phone isn't counted twice.
+    public var needsYouSessions: [CodexSession] {
+        let decided = pendingDecisions.contains { $0.kind == "sessionApproval" }
+        return attentionSessions.filter { s in
+            guard let a = s.attention, a.needsYou else { return false }
+            return !(decided && a.kind == "approval")
+        }
+    }
+
+    /// Sessions with a result (done, milestone).
+    public var resultSessions: [CodexSession] {
+        attentionSessions.filter { $0.attention?.needsYou == false }
+    }
+
+    /// The user's Codex sessions running right now.
+    public var runningSessions: [CodexSession] {
+        let since = nowMillis() - 24 * 3600 * 1000
+        return sessions.values
+            .filter { $0.state == "working" && $0.updatedAt >= since && !$0.muted && !$0.isNoise }
+            .sorted { ($0.turnStartedAt ?? $0.updatedAt) < ($1.turnStartedAt ?? $1.updatedAt) }
+    }
+
+    /// 好的 / 知道了.
+    public func ackSession(_ s: CodexSession) {
+        Task { _ = await run("session.ack", ["sessionId": s.id]) }
+    }
+
+    /// 稍后: back in 30 minutes.
+    public func snoozeSession(_ s: CodexSession) {
+        Task { _ = await run("session.snooze", ["sessionId": s.id]) }
+    }
+
+    /// 这个会话先别提醒.
+    public func muteSession(_ s: CodexSession) {
+        Task { _ = await run("session.mute", ["sessionId": s.id]) }
     }
 
     public func message(_ id: String?) -> Message? {

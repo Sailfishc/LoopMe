@@ -441,6 +441,21 @@ async fn handle(ctx: &Ctx, method: &str, p: Value) -> Result<Value> {
             Ok(json!({}))
         }
         "push.test" => Ok(json!({"report": crate::notify::test_push(app).await?})),
+        "session.ack" => Ok(json!(crate::attention::ack(app, s(&p, "sessionId")?)?)),
+        "session.snooze" => {
+            let minutes = p.get("minutes").and_then(Value::as_i64);
+            Ok(json!(crate::attention::snooze(app, s(&p, "sessionId")?, minutes)?))
+        }
+        "session.mute" => {
+            let id = s(&p, "sessionId")?;
+            let mut sess = app.store.get_session(id)?.ok_or_else(|| anyhow!("找不到这个会话"))?;
+            sess.muted = true;
+            sess.eval_at = None;
+            sess.attention = None;
+            app.store.save_session(&sess)?;
+            app.emit("session", json!(sess));
+            Ok(json!(sess))
+        }
         "sessions.analyze" => {
             app.queue(RunKind::Brief { manual: true });
             Ok(json!({}))

@@ -1,6 +1,7 @@
 //! LoopMe daemon library. See `docs/architecture.md` for the overview.
 
 pub mod app;
+pub mod attention;
 pub mod codex;
 pub mod control;
 pub mod crypto;

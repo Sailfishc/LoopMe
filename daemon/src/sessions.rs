@@ -1,13 +1,13 @@
 //! The user's own Codex sessions, fed by Codex hooks (see `hooks.rs`), and the
 //! signals LoopMe derives from them.
 //!
-//! Signals are cheap rules first and an agent run only when one passes:
-//! * a session stops while the user is away -> evaluated after a 2-minute
-//!   merge window (`MERGE_MS`), so a burst of events becomes one look;
+//! Signals are cheap rules first and a read-only look by Codex only when one passes
+//! (see `attention.rs` for what is shown and how loudly):
+//! * a session stops -> looked at after a 2-minute merge window (`MERGE_MS`), so
+//!   a burst of events becomes one look; at the Mac only after a long task;
 //! * a session that has sat still for 4 hours -> "stalled", at most once a day;
-//! * a permission request while the user is away -> a decision on the phone.
-//!
-//! When the user is at the Mac nothing is pushed; the "现在" bar just updates.
+//! * a permission request -> an `approval` card at once (and a decision on the
+//!   phone when the user is away).
 
 use crate::app::{App, RunKind};
 use crate::hooks;
@@ -26,7 +26,8 @@ fn merge_ms() -> i64 {
 pub const STALL_MS: i64 = 4 * 3600 * 1000;
 /// Sessions shown in the "现在" bar and considered for signals.
 pub const RECENT_MS: i64 = 24 * 3600 * 1000;
-const MAX_OFFERS_PER_DAY: usize = 3;
+/// Looks by Codex per day, so a busy day doesn't eat the user's Codex quota.
+const MAX_LOOKS_PER_DAY: i64 = 40;
 
 fn under(dir: &str, path: &str) -> bool {
     let d = crate::codex::expand_home(dir);
@@ -114,6 +115,7 @@ pub async fn apply_event(app: &Arc<App>, ev: &Value) -> Result<()> {
         "SessionStart" => {
             s.state = "idle".into();
             s.branch = git_branch(&s.cwd);
+            crate::attention::clear(&mut s);
         }
         "UserPromptSubmit" => {
             s.state = "working".into();
@@ -124,23 +126,39 @@ pub async fn apply_event(app: &Arc<App>, ev: &Value) -> Result<()> {
                 }
                 s.last_prompt = Some(p);
             }
-            // The user is driving it; nothing to evaluate.
+            // The user is driving it: nothing to evaluate, and the old card is answered.
             s.eval_at = None;
+            s.turn_started_at = Some(now);
+            crate::attention::clear(&mut s);
         }
         "Stop" => {
             s.state = "idle".into();
             s.last_message = g("lastMessage");
             s.branch = git_branch(&s.cwd).or(s.branch.take());
-            if away && !s.muted {
+            clear_approval(&mut s);
+            if crate::attention::worth_judging(&s, now, !away) {
                 s.eval_at = Some(now + merge_ms());
             }
         }
-        "Interrupt" => s.state = "idle".into(),
+        "Interrupt" => {
+            s.state = "idle".into();
+            clear_approval(&mut s);
+        }
         "SessionEnd" => {
             s.state = "ended".into();
         }
         "PermissionRequest" => {
             s.state = "waitingApproval".into();
+            let what = g("toolInput").or(g("toolName")).unwrap_or_else(|| "一个操作".into());
+            let att = Attention {
+                kind: "approval".into(),
+                level: "interrupt".into(),
+                summary: format!("要执行：{}", crate::notify::truncate(&what, 80)),
+                evidence: g("toolName").map(|t| format!("工具：{t}")),
+                at: now,
+                ..Default::default()
+            };
+            crate::attention::raise(app, &mut s, att).await;
             if away && settings.remote_approvals {
                 session_approval(app, &s, &event_id, g("toolName"), g("toolInput")).await?;
                 respond(app, &event_id, json!({"wait": true}));
@@ -156,6 +174,13 @@ pub async fn apply_event(app: &Arc<App>, ev: &Value) -> Result<()> {
     app.store.save_session(&s)?;
     app.emit("session", json!(s));
     Ok(())
+}
+
+/// The approval was answered (or Codex moved on): its card goes away.
+fn clear_approval(s: &mut CodexSession) {
+    if s.attention.as_ref().is_some_and(|a| a.kind == "approval") {
+        s.attention = None;
+    }
 }
 
 async fn session_approval(app: &Arc<App>, s: &CodexSession, event_id: &str, tool: Option<String>, input: Option<String>) -> Result<()> {
@@ -218,7 +243,8 @@ pub fn release_session_approvals(app: &App) {
     }
 }
 
-/// Merged "stopped" signals and stalled sessions -> agent runs. Called from the scheduler.
+/// Merged "stopped" signals and stalled sessions -> looks by Codex; stale approvals expire.
+/// Called from the scheduler.
 pub fn tick(app: &Arc<App>, settings: &Settings) -> Result<()> {
     if !settings.codex_hooks || settings.paused {
         return Ok(());
@@ -231,34 +257,47 @@ pub fn tick(app: &Arc<App>, settings: &Settings) -> Result<()> {
             chrono::TimeZone::timestamp_millis_opt(&chrono::Local, t).single().map(|d| d.format("%Y-%m-%d").to_string()) == Some(today.clone())
         })
     };
+    let looks_key = format!("session_looks:{today}");
+    let mut looks: i64 = app.store.kv_get(&looks_key)?.and_then(|v| v.parse().ok()).unwrap_or(0);
     let sessions = app.store.sessions_since(now - 3 * 24 * 3600 * 1000)?;
-    let mut budget = MAX_OFFERS_PER_DAY.saturating_sub(sessions.iter().filter(|s| offered_today(s)).count());
     for mut s in sessions {
+        // The hook gave up waiting (or the answer never came back): no longer 等授权.
+        if s.state == "waitingApproval" && now - s.updated_at > crate::attention::STALE_APPROVAL_MS {
+            s.state = "idle".into();
+            clear_approval(&mut s);
+            app.store.save_session(&s)?;
+            app.emit("session", json!(s));
+        }
         if s.muted || ignored(settings, &s.cwd) {
             continue;
         }
         let reason = if s.eval_at.is_some_and(|t| t <= now) {
             Some("stopped")
-        } else if s.state == "idle" && now - s.updated_at >= STALL_MS && s.updated_at >= now - RECENT_MS * 2 && !offered_today(&s) {
+        } else if away
+            && s.state == "idle"
+            && s.attention.is_none()
+            && !crate::attention::is_noise(&s)
+            && now - s.updated_at >= STALL_MS
+            && s.updated_at >= now - RECENT_MS * 2
+            && !offered_today(&s)
+        {
             Some("stalled")
         } else {
             None
         };
         let Some(reason) = reason else { continue };
         s.eval_at = None;
-        // Signals only reach the agent when the user is away; at the Mac the bar is enough.
-        if !away || budget == 0 || offered_today(&s) {
-            if reason == "stalled" {
-                s.offered_at = Some(now); // look again tomorrow
-            }
-            app.store.save_session(&s)?;
+        if reason == "stalled" {
+            s.offered_at = Some(now); // at most once a day
+        }
+        app.store.save_session(&s)?;
+        if looks >= MAX_LOOKS_PER_DAY {
             continue;
         }
-        budget -= 1;
-        s.offered_at = Some(now);
-        app.store.save_session(&s)?;
+        looks += 1;
         app.queue(RunKind::Session { session_id: s.id.clone(), reason: reason.into() });
     }
+    app.store.kv_set(&looks_key, &looks.to_string())?;
     Ok(())
 }
 
