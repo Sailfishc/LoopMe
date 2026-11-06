@@ -11,9 +11,12 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, SPUStand
     private var controller: SPUStandardUpdaterController?
     private weak var daemon: DaemonController?
 
-    /// Configured when the build set `LOOPME_UPDATE_FEED_URL` (see docs/mac-updates.md).
+    /// Configured in Release builds (see docs/mac-updates.md).
+    /// Sparkle needs both the feed and the EdDSA public key; without either the updater stays off.
     static var feedURL: String? {
-        (Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String).flatMap { $0.hasPrefix("http") ? $0 : nil }
+        let key = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String ?? ""
+        guard !key.isEmpty else { return nil }
+        return (Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String).flatMap { $0.hasPrefix("http") ? $0 : nil }
     }
 
     var enabled: Bool { controller != nil }
