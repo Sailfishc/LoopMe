@@ -308,14 +308,16 @@ async fn handle(ctx: &Ctx, method: &str, p: Value) -> Result<Value> {
         }
         "decision.answer" => {
             let did = s(&p, "decisionId")?.to_string();
+            // `later` (回 Mac 再说): no answer from the phone; Codex asks again on the Mac.
             let approved = match s(&p, "choice")? {
-                "approve" => true,
-                "reject" => false,
+                "approve" => Some(true),
+                "reject" => Some(false),
+                "later" => None,
                 other => bail!("未知选择 {other}"),
             };
             let cid = p.get("clientId").and_then(Value::as_str);
             idempotent(app, cid, || async {
-                let d = engine::answer_decision(app, &did, Some(approved)).await?;
+                let d = engine::answer_decision(app, &did, approved).await?;
                 Ok(json!(d))
             })
             .await
