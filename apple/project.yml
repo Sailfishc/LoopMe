@@ -1,0 +1,116 @@
+# Generate the Xcode project with:  cd apple && xcodegen generate
+# iOS uses the same team and bundle ID as the paired production device build.
+# Set the Mac signing identity before distributing the Mac app (see docs/build.md).
+name: LoopMe
+options:
+  bundleIdPrefix: com.example.loopme
+  deploymentTarget:
+    iOS: "17.0"
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "10"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+packages:
+  LoopMeKit:
+    path: LoopMeKit
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.6.0
+targets:
+  LoopMe:
+    type: application
+    platform: iOS
+    sources:
+      - path: iOS
+    dependencies:
+      - package: LoopMeKit
+    settings:
+      base:
+        DEVELOPMENT_TEAM: 35KYWWD972
+        PRODUCT_BUNDLE_IDENTIFIER: com.sailfishc.loopme.ios
+        PRODUCT_NAME: LoopMe
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    info:
+      path: iOS/Info.plist
+      properties:
+        CFBundleDisplayName: LoopMe
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        # All iOS cryptography is provided by Apple's CryptoKit/Security frameworks.
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIBackgroundModes: [remote-notification]
+        NSCameraUsageDescription: 扫描 Mac 上显示的二维码来完成配对。
+        NSLocalNetworkUsageDescription: 通过局域网或公司 VPN 连接你的 Mac。
+        # Relay addresses are dynamic and may be public-range IPs behind a VPN.
+        # NSAllowsLocalNetworking would override this exception and prevent custom trust.
+        # PinnedTrust still requires the certificate fingerprint saved during pairing.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        CFBundleURLTypes:
+          - CFBundleURLName: com.sailfishc.loopme.pair
+            CFBundleURLSchemes: [loopme]
+    entitlements:
+      path: iOS/LoopMe.entitlements
+      properties:
+        aps-environment: development
+
+  LoopMeMac:
+    type: application
+    platform: macOS
+    sources:
+      - path: Mac
+    dependencies:
+      - package: LoopMeKit
+      - package: Sparkle
+        product: Sparkle
+    settings:
+      base:
+        # Auto-update (docs/mac-updates.md). Empty feed URL = updater off (Debug builds).
+        # Keep the public key local: release-mac.sh reads it from ignored apple/release.env.
+        LOOPME_UPDATE_FEED_URL: ""
+        LOOPME_UPDATE_PUBLIC_KEY: ""
+        DEVELOPMENT_TEAM: 35KYWWD972
+        PRODUCT_BUNDLE_IDENTIFIER: com.sailfishc.loopme.mac
+        PRODUCT_NAME: LoopMe
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_HARDENED_RUNTIME: YES
+      configs:
+        Release:
+          CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+          # Release builds look for updates on GitHub Releases (docs/mac-updates.md).
+          LOOPME_UPDATE_FEED_URL: https://github.com/Sailfishc/LoopMe/releases/latest/download/appcast.xml
+    info:
+      path: Mac/Info.plist
+      properties:
+        CFBundleDisplayName: LoopMe
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        LSUIElement: true
+        LSMinimumSystemVersion: "14.0"
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+        NSAppleEventsUsageDescription: 用于打开“终端”运行 codex login。
+        SUFeedURL: "$(LOOPME_UPDATE_FEED_URL)"
+        SUPublicEDKey: "$(LOOPME_UPDATE_PUBLIC_KEY)"
+        SUEnableAutomaticChecks: true
+        SUScheduledCheckInterval: 86400
+        SUAutomaticallyUpdate: false
+    entitlements:
+      path: Mac/LoopMe.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+    postCompileScripts:
+      - name: Build loopme-daemon (Rust)
+        script: "\"${SRCROOT}/scripts/build-daemon.sh\""
+        basedOnDependencyAnalysis: false
+        shell: /bin/bash

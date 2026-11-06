@@ -32,3 +32,22 @@ Icon?
 
 # NFS temporary files
 .nfs*
+# Rust
+daemon/target/
+# Xcode
+apple/*.xcodeproj/
+apple/build/
+# XcodeGen outputs configured in apple/project.yml
+apple/Mac/Info.plist
+apple/Mac/LoopMe.entitlements
+apple/iOS/Info.plist
+apple/iOS/LoopMe.entitlements
+DerivedData/
+*.xcuserstate
+__pycache__/
+# Secrets and internal release settings (never commit)
+*.p8
+*.p12
+apns.json
+sparkle_private_key*
+apple/release.env
