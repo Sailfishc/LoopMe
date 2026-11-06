@@ -19,6 +19,9 @@ settings:
 packages:
   LoopMeKit:
     path: LoopMeKit
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.6.0
 targets:
   LoopMe:
     type: application
@@ -65,8 +68,13 @@ targets:
       - path: Mac
     dependencies:
       - package: LoopMeKit
+      - package: Sparkle
+        product: Sparkle
     settings:
       base:
+        # Auto-update (docs/mac-updates.md). Empty feed URL = updater off (local builds).
+        LOOPME_UPDATE_FEED_URL: ""
+        LOOPME_UPDATE_PUBLIC_KEY: ""
         DEVELOPMENT_TEAM: 35KYWWD972
         PRODUCT_BUNDLE_IDENTIFIER: com.sailfishc.loopme.mac
         PRODUCT_NAME: LoopMe
@@ -87,6 +95,11 @@ targets:
           NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
         NSAppleEventsUsageDescription: 用于打开“终端”运行 codex login。
+        SUFeedURL: "$(LOOPME_UPDATE_FEED_URL)"
+        SUPublicEDKey: "$(LOOPME_UPDATE_PUBLIC_KEY)"
+        SUEnableAutomaticChecks: true
+        SUScheduledCheckInterval: 86400
+        SUAutomaticallyUpdate: false
     entitlements:
       path: Mac/LoopMe.entitlements
       properties:

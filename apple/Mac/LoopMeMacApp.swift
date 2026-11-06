@@ -12,6 +12,7 @@ struct LoopMeMacApp: App {
                 .environmentObject(delegate.store)
                 .environmentObject(delegate.daemon)
                 .environmentObject(delegate.keepAwake)
+                .environmentObject(delegate.updater)
                 .preferredColorScheme(AppearanceSetting.colorScheme(appearance))
         } label: {
             MenuBarIcon().environmentObject(delegate.store)
@@ -55,10 +56,12 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate {
     let store = LoopMeStore()
     let daemon = DaemonController()
     let keepAwake = KeepAwake()
+    let updater = AppUpdater()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         daemon.start(store: store)
         keepAwake.start()
+        updater.start(daemon: daemon)
     }
 
     func applicationWillTerminate(_ notification: Notification) {

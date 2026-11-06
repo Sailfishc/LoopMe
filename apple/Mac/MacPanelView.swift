@@ -6,6 +6,7 @@ import SwiftUI
 struct MacPanelView: View {
     @EnvironmentObject var store: LoopMeStore
     @EnvironmentObject var daemon: DaemonController
+    @EnvironmentObject var updater: AppUpdater
     @EnvironmentObject var keepAwake: KeepAwake
     @Environment(\.openWindow) private var openWindow
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -267,6 +268,9 @@ struct MacPanelView: View {
             Spacer()
             Menu {
                 Button("现在整理今天的事") { store.briefNow() }
+                if updater.enabled {
+                    Button("检查更新…") { updater.checkForUpdates() }.disabled(!updater.canCheck)
+                }
                 Button("重启 daemon") { daemon.restart() }
                 Button("打开日志") { NSWorkspace.shared.open(daemon.logURL) }
                 Button("打开数据目录") { NSWorkspace.shared.open(daemon.dataDirectory) }
@@ -278,6 +282,7 @@ struct MacPanelView: View {
             .fixedSize()
             Button("退出") { NSApp.terminate(nil) }
         }
+
         .buttonStyle(.plain)
         .font(.subheadline)
         .foregroundStyle(Theme.text)
