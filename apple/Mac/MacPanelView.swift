@@ -192,15 +192,36 @@ struct MacPanelView: View {
         }
     }
 
+    private var relayText: String {
+        let port = String(store.status.relayPort)
+        switch store.status.relay {
+        case "on": return "Relay 运行中 · 端口 \(port)"
+        case "connecting": return "Relay 启动中…"
+        case "error": return "Relay 出错，看日志"
+        default: return "直连 · 端口 \(String(store.status.listenPort))"
+        }
+    }
+
     private var networkSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            row(icon: "network", title: "连接方式") {
-                Text("直连 · 端口 \(String(store.status.listenPort))").foregroundStyle(Theme.secondary)
+            row(icon: "network", title: "手机连接") {
+                Text(relayText).foregroundStyle(store.status.relay == "error" ? Theme.danger : Theme.secondary)
             }
             if !store.status.hosts.isEmpty {
                 Text(store.status.hosts.joined(separator: "  ")).font(.caption2.monospaced()).foregroundStyle(Theme.secondary)
                     .lineLimit(2).padding(.leading, 26)
+                    .help("手机按这个顺序尝试这些地址")
             }
+            DisclosureGroup("对外地址") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("IT 给这台 Mac 分配了固定 IP 或内网域名时填在这里，二维码会把它排在最前。改完需要手机重新扫码。")
+                        .font(.caption2).foregroundStyle(Theme.secondary)
+                    FolderListEditor(title: "", key: "relayHosts", folders: store.settings.relayHosts, placeholder: "loopme-mac.corp.example 或 10.20.30.40")
+                }
+                .padding(.top, 4)
+            }
+            .font(.caption)
+            .padding(.leading, 26)
             row(icon: "bell", title: "推送") {
                 Text(store.status.pushConfigured ? "APNs 已配置" : "未配置 apns.json").foregroundStyle(Theme.secondary)
             }

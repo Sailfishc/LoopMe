@@ -65,6 +65,9 @@ public struct SettingsForm: View {
         Section("Mac") {
             row("名称", store.status.macName.isEmpty ? (store.credentials?.macName ?? "Mac") : store.status.macName)
             row("连接", Fmt.connection(store.connection))
+            #if os(iOS)
+            NavigationLink("连接诊断") { ConnectionDiagnosticsView() }
+            #endif
             row("Codex", codexText)
             row("Agent", agentText)
             Toggle("暂停主动工作", isOn: binding({ store.settings.paused }, { v in store.updateSettings(["paused": v]) }))
@@ -237,7 +240,8 @@ struct WorkspaceRootsEditor: View {
 }
 
 /// A list of folders stored in one settings key (Mac only).
-struct FolderListEditor: View {
+/// A list of strings stored under one settings key (folders, addresses), with 添加 / remove.
+public struct FolderListEditor: View {
     @EnvironmentObject var store: LoopMeStore
     let title: String
     let key: String
@@ -245,7 +249,14 @@ struct FolderListEditor: View {
     let placeholder: String
     @State private var newFolder = ""
 
-    var body: some View {
+    public init(title: String, key: String, folders: [String], placeholder: String) {
+        self.title = title
+        self.key = key
+        self.folders = folders
+        self.placeholder = placeholder
+    }
+
+    public var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.subheadline)
             ForEach(folders, id: \.self) { r in

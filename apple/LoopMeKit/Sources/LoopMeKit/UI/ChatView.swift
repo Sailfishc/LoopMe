@@ -11,6 +11,7 @@ public struct ChatView: View {
     @State private var draft = ""
     @State private var nowExpanded = false
     @State private var selecting: Message?
+    @State private var diagnosing = false
     @FocusState private var inputFocused: Bool
 
     public init() {}
@@ -21,14 +22,18 @@ public struct ChatView: View {
             NowBar(expanded: $nowExpanded)
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
+                    LazyVStack(alignment: .leading, spacing: 6) {
                         if store.messages.isEmpty && store.outgoing.isEmpty {
                             emptyState
                         }
-                        ForEach(store.messages) { m in
-                            if isShown(m) {
-                                MessageRow(message: m, onSelectText: { selecting = $0 }, onReply: { reply(to: $0) }).id(m.id)
-                            }
+                        let shown = store.messages.filter(isShown)
+                        let latestAgent = shown.last(where: { $0.role == "agent" })?.id
+                        ForEach(Array(shown.enumerated()), id: \.element.id) { i, m in
+                            MessageRow(message: m, latest: m.id == latestAgent,
+                                       onSelectText: { selecting = $0 }, onReply: { reply(to: $0) })
+                                // A new speaker starts a little further down; consecutive blocks sit close.
+                                .padding(.top, i > 0 && shown[i - 1].role != m.role ? 10 : 0)
+                                .id(m.id)
                         }
                         ForEach(store.outgoing) { o in
                             HStack {
@@ -37,8 +42,8 @@ public struct ChatView: View {
                                     if let q = store.message(o.replyTo) { QuoteLine(text: q.text) }
                                     Text(o.text)
                                         .padding(.horizontal, 14).padding(.vertical, 10)
-                                        .foregroundStyle(Theme.text)
-                                        .background(Theme.userBubble.opacity(0.6), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                                        .foregroundStyle(Theme.userText)
+                                        .background(Theme.userBubble.opacity(0.6), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                                     Text("已发送").font(.caption2).foregroundStyle(Theme.secondary)
                                 }
                             }
@@ -93,6 +98,14 @@ public struct ChatView: View {
         .sheet(item: $selecting) { m in
             SelectTextSheet(text: m.text)
         }
+        #if os(iOS)
+        .sheet(isPresented: $diagnosing) {
+            NavigationStack {
+                ConnectionDiagnosticsView()
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { diagnosing = false } } }
+            }
+        }
+        #endif
     }
 
     /// Room for the connection banner and the "现在" bar above the expanded panel.
@@ -117,6 +130,11 @@ public struct ChatView: View {
                     .font(.caption)
                     .lineLimit(1)
                 Spacer()
+                #if os(iOS)
+                if case .failed = store.connection {
+                    Button("诊断") { diagnosing = true }.font(.caption.weight(.semibold))
+                }
+                #endif
                 Button("重试") { store.conn.reconnectNow() }.font(.caption.weight(.semibold))
             }
             .padding(.horizontal, 16).padding(.vertical, 8)
@@ -219,14 +237,27 @@ struct WorkingRow: View {
 public struct MessageRow: View {
     @EnvironmentObject var store: LoopMeStore
     let message: Message
+    /// The newest agent reply stays open; older long replies fold to a preview.
+    var latest: Bool
     var onSelectText: ((Message) -> Void)?
     var onReply: ((Message) -> Void)?
+    @State private var expanded: Bool?
 
-    public init(message: Message, onSelectText: ((Message) -> Void)? = nil, onReply: ((Message) -> Void)? = nil) {
+    public init(message: Message, latest: Bool = false, onSelectText: ((Message) -> Void)? = nil, onReply: ((Message) -> Void)? = nil) {
         self.message = message
+        self.latest = latest
         self.onSelectText = onSelectText
         self.onReply = onReply
     }
+
+    /// Lines past which a reply folds.
+    static let foldLines = 6
+
+    private var isLong: Bool {
+        message.text.split(separator: "\n", omittingEmptySubsequences: false).count > Self.foldLines + 2 || message.text.count > 360
+    }
+
+    private var isExpanded: Bool { message.streaming || !isLong || (expanded ?? latest) }
 
     public var body: some View {
         switch message.role {
@@ -237,8 +268,9 @@ public struct MessageRow: View {
                     if let q = store.message(message.replyTo) { QuoteLine(text: q.offer?.title ?? q.text) }
                     Text(message.text)
                         .padding(.horizontal, 14).padding(.vertical, 10)
-                        .foregroundStyle(Theme.text)
-                        .background(Theme.userBubble, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .foregroundStyle(Theme.userText)
+                        .tint(Theme.userText)
+                        .background(Theme.userBubble, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                         .contextMenu { menu(feedback: false) }
                 }
             }
@@ -248,16 +280,15 @@ public struct MessageRow: View {
                     OfferCard(message: message, offer: offer)
                         .contextMenu { menu(feedback: true) }
                 } else if !message.text.isEmpty {
-                    (Text(markdown(message.text)) + Text(message.streaming ? " ▍" : "").foregroundColor(Theme.secondary))
-                        .font(.body)
-                        .foregroundStyle(Theme.text)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .contextMenu { menu(feedback: true) }
+                    HStack(spacing: 0) {
+                        agentBlock
+                        Spacer(minLength: 36)
+                    }
                 }
                 if let f = message.feedback {
                     Text(f == "up" ? "👍 你觉得有用" : "👎 你觉得没用，以后少发这类")
                         .font(.caption2).foregroundStyle(Theme.secondary)
+                        .padding(.leading, 6)
                 }
                 attachments
             }
@@ -271,6 +302,36 @@ public struct MessageRow: View {
                     .frame(maxWidth: .infinity, alignment: .center)
             }
         }
+    }
+
+    /// The agent's reply as a grey block; long ones fold to a few lines with 展开.
+    private var agentBlock: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            (Text(markdown(message.text)) + Text(message.streaming ? " ▍" : "").foregroundColor(Theme.secondary))
+                .font(.body)
+                .foregroundStyle(Theme.text)
+                .lineSpacing(2)
+                .lineLimit(isExpanded ? nil : Self.foldLines)
+                .fixedSize(horizontal: false, vertical: true)
+            if isLong && !message.streaming {
+                Button {
+                    withAnimation(.easeOut(duration: 0.2)) { expanded = !isExpanded }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(isExpanded ? "收起" : "展开全文")
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint(isExpanded ? "收起这条回复" : "显示这条回复的全文")
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 11)
+        .background(Theme.agentBubble, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .contextMenu { menu(feedback: true) }
     }
 
     /// Long press: 👍/👎 (agent messages), 复制, 选择文本, 回复.

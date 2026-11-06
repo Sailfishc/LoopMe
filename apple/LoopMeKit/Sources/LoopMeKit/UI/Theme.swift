@@ -12,7 +12,13 @@ public enum Theme {
     public static let border = Color.dynamic(light: 0xE3E3E8, dark: 0x26262B)
     public static let text = Color.dynamic(light: 0x111114, dark: 0xF2F2F5)
     public static let secondary = Color.dynamic(light: 0x6B6B73, dark: 0x9A9AA2)
-    public static let userBubble = Color.dynamic(light: 0xE9E9EE, dark: 0x232328)
+    /// Your messages: a blue bubble on the right.
+    public static let userBubble = Color.dynamic(light: 0x4A72B0, dark: 0x5F7FAE)
+    public static let userText = Color(hex: 0xFFFFFF)
+    /// The agent's replies: grey blocks on the left.
+    public static let agentBubble = Color.dynamic(light: 0xECECF0, dark: 0x252528)
+    /// Quiet fill for secondary buttons and code boxes.
+    public static let subtleFill = Color.dynamic(light: 0xF0F0F3, dark: 0x202024)
     public static let green = Color(hex: 0x34C77B)
     public static let accent = Color.dynamic(light: 0x4B5BD6, dark: 0xA9B4FF)
     public static let warning = Color(hex: 0xF5C46B)
@@ -71,6 +77,29 @@ public struct PillButtonStyle: ButtonStyle {
             .background(prominent ? Theme.pill : Theme.card, in: Capsule())
             .overlay(Capsule().stroke(prominent ? Color.clear : Theme.border, lineWidth: 1))
             .opacity(configuration.isPressed ? 0.7 : 1)
+    }
+}
+
+/// Full-width action buttons on cards (同意 / 拒绝, 让我来 …): 40 pt tall, 12 pt corners, a slight press.
+public struct ActionButtonStyle: ButtonStyle {
+    public enum Kind { case primary, secondary, destructive }
+    var kind: Kind
+    public init(_ kind: Kind = .primary) { self.kind = kind }
+
+    public func makeBody(configuration: Configuration) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        return configuration.label
+            .font(.subheadline.weight(.semibold))
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, minHeight: 40)
+            .padding(.horizontal, 10)
+            .foregroundStyle(kind == .primary ? Theme.pillText : (kind == .destructive ? Theme.danger : Theme.text))
+            .background(kind == .primary ? Theme.pill : Theme.subtleFill, in: shape)
+            .overlay(shape.stroke(kind == .primary ? Color.clear : Theme.border, lineWidth: 1))
+            .contentShape(shape)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 

@@ -23,10 +23,31 @@ Mac 菜单栏 App ────── 同一协议, 127.0.0.1 ─────┘ 
 
 ## 与设计文档的差异（v0）
 
-- **网络层**：设计定的是 iroh + 内网 relay。为了保证明天能直接构建联调，v0 先用“手机经 VPN/局域网直连 Mac 的 WebSocket（端口 7788）+ 应用层端到端加密”。加密方案和 iroh 无关，以后换 iroh 只需替换传输层，协议和配对不变。
+- **网络层**：设计定的是 iroh + 内网 relay。现在用的是自己的轻量 Relay（见下文「手机怎么连到 Mac」）+ 应用层端到端加密。加密方案和传输层无关，以后换 iroh 只需替换传输层，协议和配对不变。
 - **daemon 托管**：v0 由菜单栏 App 以子进程方式启动 daemon（退出 App 即停止）。设计中的 `SMAppService.agent`（LaunchAgent）放到下一步。
 - **共享核心**：设计是 Rust `loopme-core` 通过 UniFFI 给 iOS 用。v0 的 iOS 端用 CryptoKit 原生实现同一套加密（两边用同一组测试向量校验），省去 UniFFI 构建链。
 - **Agent 输出结构化信息**：用回复末尾的 `<loopme>{json}</loopme>` 控制块（对用户隐藏），而不是 Codex 的实验性 dynamic tools。
+
+## 手机怎么连到 Mac（Relay）
+
+手机不再直连 daemon，而是连 Mac 上的 `loopme-relay`。daemon 只在 `127.0.0.1:7788` 监听（给 Mac App），并主动连到 Relay。
+
+```
+手机 ──wss──▶ loopme-relay（0.0.0.0:8443，自签证书）◀──ws── loopme-daemon（127.0.0.1:8444 出站）
+          └──────────── 端到端加密（X25519 + ChaCha20-Poly1305），Relay 只转发密文 ────────────┘
+```
+
+- **进程**：daemon 启动时用 `loopme-daemon relay --listen 0.0.0.0:8443 --mac-listen 127.0.0.1:8444` 拉起 Relay，退出就重启。`--relay-port 0` 回到旧的直连模式（daemon 监听 0.0.0.0）。
+- **Relay 接口**（`daemon/src/relay.rs`）：
+  - `GET /healthz?mac=<id>&t=<token>`：`{"ok":true,"macOnline":…}`，给手机的连接诊断用；不带凭据时不透露 Mac 是否在线。
+  - `/v1/mac`（只在回环端口免令牌；公网端口要 `LOOPME_RELAY_MAC_TOKENS`）：daemon 注册 `{"t":"register","macId","phoneToken"}`。
+  - `/v1/phone/<macId>/pair|session?t=<token>`：手机接入。Relay 给 daemon 发 `{"t":"incoming","conn","path"}`，daemon 再出站连 `/v1/mac/accept?conn=`，Relay 把两条 WebSocket 逐帧拼接。之后的协议和以前的 `/v1/pair`、`/v1` 完全一样。
+  - 出错时先回一帧 `{"t":"error","code":"mac_offline"|"bad_token","message"}` 再关闭。
+- **证书**：首次启动生成到 `<data>/relay/cert.der`。二维码带它的 SHA-256（`f`），手机只认这个指纹，不做 CA 和主机名校验。
+- **令牌**：`phoneToken` 存在 kv（`relay_phone_token`），写进二维码（`t`）。它只用来挡住内网里的随意连接，设备身份仍由配对密钥证明。
+- **二维码 v2**：`loopme://pair?v=2&k&c&h&p=<relay 端口>&n&r=<macId>&t=<token>&f=<指纹>`。`h` 依次是：设置里的「对外地址」（`relayHosts`）→ VPN 网卡地址 → 其他 IPv4 → `.local`。v1（没有 `r`）仍按直连处理。
+- **手机**：同时尝试前几个地址（每个晚 250 ms 启动），先完成握手的胜出；网络或 VPN 变化时立即重连。「设置 → 连接诊断」逐个地址检查 TCP、Relay、Mac 在线，并给出一句结论。
+- **挪到服务器**：`--relay-url ws://relay.corp:8444 --relay-hosts relay.corp`（加 `LOOPME_RELAY_MAC_TOKEN`）让 daemon 连别处的同一个 Relay，手机侧只是二维码里的地址变了。
 
 ## 加密与配对
 

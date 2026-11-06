@@ -107,7 +107,11 @@ xcrun stapler staple "$APP"
 
 ### 常见问题
 
-- **手机连不上 Mac**：二维码里带了 Mac 的所有 IPv4 地址和 `.local` 名称，手机会依次尝试。VPN 地址不在其中时，可以在启动 daemon 前设置环境变量 `LOOPME_HOSTS=10.x.x.x`（多个用逗号分隔），或在终端用 `LOOPME_HOSTS=... cargo run` 启动。另外检查 macOS 防火墙是否允许 `loopme-daemon` 接受连接（端口 7788）。
+- **手机连不上 Mac**：先在手机上打开「设置 → 连接诊断」（聊天页顶部连不上时也有「诊断」按钮），它会给出一句结论，并能复制报告。
+  - 手机经 Mac 上的 Relay 连接，端口 **8443**（WSS）。daemon 自己只听本机。旧版本配对的手机需要重新扫码。
+  - 结论是「网络到不了这台 Mac」：在 Mac 上 `sudo tcpdump -n -i any 'tcp port 8443'`，手机再连一次。一个包都没有，说明公司网络拦了，需要请 IT 放行「VPN 地址池 → 这台 Mac 的 8443」，或者把 Relay 挪到服务器（见 architecture.md）。
+  - 有包但连不上：检查 macOS 防火墙是否允许 `loopme-daemon` 接受连接。
+  - IT 给 Mac 分配了固定 IP 或内网域名：填到 Mac 面板「手机连接 → 对外地址」，再重新扫码。临时也可以用环境变量 `LOOPME_HOSTS`。
 - **iOS 提示本地网络权限**：允许即可；拒绝后需要在 设置 → 隐私 → 本地网络 里打开。
 - **Codex 找不到**：daemon 依次查找设置里的路径、`LOOPME_CODEX`、登录 shell 里的 `codex`、`/opt/homebrew/bin`、`/usr/local/bin` 等。
 - **hook 没反应**：看 Mac 面板“你的 Codex 会话”是不是“已接入”；`codex` 版本需要 0.166 以上。Codex 只运行标记过信任的 hook，LoopMe 换位置后会在 10 分钟内自动重新标记，也可以在面板里点“重新接入”。

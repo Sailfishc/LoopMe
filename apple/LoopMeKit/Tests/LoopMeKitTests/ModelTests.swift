@@ -35,3 +35,32 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(Fmt.sessionState(c.state), "正在跑")
     }
 }
+
+final class RelayLinkTests: XCTestCase {
+    func testV2PairingLinkCarriesRelay() throws {
+        let k = Data(repeating: 7, count: 32).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        let link = try XCTUnwrap(PairingLink(string: "loopme://pair?v=2&k=\(k)&c=abc&h=10.0.0.5,mac.local&p=8443&n=TWFj&r=mid1&t=tok123&f=ABCDEF"))
+        XCTAssertEqual(link.port, 8443)
+        XCTAssertEqual(link.relay, RelayInfo(macId: "mid1", token: "tok123", fingerprint: "abcdef"))
+        let url = LoopMeEndpoint.url(host: "10.0.0.5", port: 8443, relay: link.relay, kind: .session)
+        XCTAssertEqual(url?.absoluteString, "wss://10.0.0.5:8443/v1/phone/mid1/session?t=tok123")
+        // v1 links stay direct.
+        let v1 = try XCTUnwrap(PairingLink(string: "loopme://pair?v=1&k=\(k)&c=abc&h=10.0.0.5&p=7788&n=TWFj"))
+        XCTAssertNil(v1.relay)
+        XCTAssertEqual(LoopMeEndpoint.url(host: "10.0.0.5", port: 7788, relay: nil, kind: .pair)?.absoluteString, "ws://10.0.0.5:7788/v1/pair")
+    }
+
+    func testOldCredentialsDecodeWithoutRelay() throws {
+        let json = #"{"deviceId":"d","privateKey":"p","macPublicKey":"m","macName":"Mac","hosts":["a"],"port":7788}"#
+        let c = try JSONDecoder().decode(MacCredentials.self, from: Data(json.utf8))
+        XCTAssertNil(c.relay)
+    }
+
+    func testVerdicts() {
+        let row = { (tcp: String, ok: Bool) in ConnectionReport.Row(host: "h", tcp: tcp, tcpOK: ok, relay: nil, relayOK: false, macOnline: nil) }
+        XCTAssertTrue(LoopMeDiagnostics.verdict([row("超时", false)], onVPN: false, relay: true).contains("VPN"))
+        XCTAssertTrue(LoopMeDiagnostics.verdict([row("超时", false)], onVPN: true, relay: true).contains("IT"))
+        XCTAssertTrue(LoopMeDiagnostics.verdict([row("被拒绝", false)], onVPN: true, relay: true).contains("端口"))
+    }
+}

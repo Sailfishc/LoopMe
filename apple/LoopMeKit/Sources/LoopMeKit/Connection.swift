@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Network
 
 public struct RPCError: LocalizedError {
     public var message: String
@@ -53,13 +54,34 @@ public final class LoopMeConnection {
     private var generation = 0
     private var wantConnected = false
     private var retryDelay: Double = 1
-    private let session: URLSession
+    /// Recreated per Mac: it pins that Mac's relay certificate.
+    private var session: URLSession = LoopMeEndpoint.session(pinning: nil)
+    private var sessionPin: String??
+    private let pathMonitor = NWPathMonitor()
+    private var lastPath: String?
 
     public init() {
-        let cfg = URLSessionConfiguration.default
-        cfg.waitsForConnectivity = false
-        cfg.timeoutIntervalForRequest = 15
-        session = URLSession(configuration: cfg)
+        // Wi-Fi, cellular or the VPN came up or went away: try again now instead of waiting out the backoff.
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            let key = "\(path.status)|" + path.availableInterfaces.map(\.name).joined(separator: ",")
+            Task { @MainActor in self?.pathChanged(key, satisfied: path.status == .satisfied) }
+        }
+        pathMonitor.start(queue: .global(qos: .utility))
+    }
+
+    private func pathChanged(_ key: String, satisfied: Bool) {
+        defer { lastPath = key }
+        guard lastPath != nil, key != lastPath, satisfied, wantConnected else { return }
+        if state == .connected {
+            // The old socket may be dead on the new route; a ping finds out within seconds.
+            let gen = generation
+            Task {
+                do { _ = try await self.call("ping") } catch { if gen == self.generation { self.connectionLost("网络变化，重新连接") } }
+            }
+        } else {
+            retryDelay = 1
+            startConnecting()
+        }
     }
 
     public var isConnected: Bool { state == .connected }
@@ -133,29 +155,70 @@ public final class LoopMeConnection {
         Task { await self.attempt(creds, gen) }
     }
 
-    private func attempt(_ creds: MacCredentials, _ gen: Int) async {
-        var lastError = "无法连接到 Mac"
-        for host in creds.hosts {
-            guard gen == generation else { return }
-            do {
-                try await handshake(host: host, creds: creds, gen: gen)
-                return
-            } catch HandshakeError.unknownDevice {
-                wantConnected = false
-                state = .failed(HandshakeError.unknownDevice.localizedDescription)
-                onUnpaired?()
-                return
-            } catch {
-                lastError = "\(host)：\(error.localizedDescription)"
-            }
-        }
-        guard gen == generation else { return }
-        state = .failed(lastError)
-        scheduleReconnect()
+    private struct Opened {
+        let ws: URLSessionWebSocketTask
+        let sealer: FrameSealer
+        let opener: FrameOpener
     }
 
-    private func handshake(host: String, creds: MacCredentials, gen: Int) async throws {
-        guard let url = URL(string: "ws://\(host):\(creds.port)/v1") else { throw HandshakeError.badHello }
+    private enum Outcome {
+        case ok(String, Opened)
+        case unknownDevice
+        case failed(String)
+    }
+
+    /// Tries the addresses at the same time (each a little after the previous one) and keeps the first that completes the handshake.
+    private func attempt(_ creds: MacCredentials, _ gen: Int) async {
+        let pin: String? = creds.relay?.fingerprint
+        if sessionPin != .some(pin) {
+            session.finishTasksAndInvalidate()
+            session = LoopMeEndpoint.session(pinning: pin)
+            sessionPin = .some(pin)
+        }
+        let hosts = Array(creds.hosts.prefix(6))
+        let outcome: Outcome = await withCheckedContinuation { cont in
+            let race = Race(cont, count: hosts.count) { errors in Outcome.failed(errors.last ?? "无法连接到 Mac") }
+            for (i, host) in hosts.enumerated() {
+                Task { @MainActor in
+                    if i > 0 { try? await Task.sleep(nanoseconds: UInt64(i) * 250_000_000) }
+                    if race.done { race.lost(nil); return }
+                    do {
+                        let o = try await self.open(host: host, creds: creds)
+                        if !race.win(.ok(host, o)) { o.ws.cancel(with: .goingAway, reason: nil) }
+                    } catch HandshakeError.unknownDevice {
+                        _ = race.win(.unknownDevice)
+                    } catch {
+                        race.lost("\(host)：\(error.localizedDescription)")
+                    }
+                }
+            }
+        }
+        guard gen == generation else {
+            if case .ok(_, let o) = outcome { o.ws.cancel(with: .goingAway, reason: nil) }
+            return
+        }
+        switch outcome {
+        case .ok(let host, let o):
+            socket = o.ws
+            sealer = o.sealer
+            opener = o.opener
+            retryDelay = 1
+            state = .connected
+            onConnectedHost?(host)
+            receiveTask = Task { await self.receiveLoop(o.ws, gen) }
+            pingTask = Task { await self.pingLoop(gen) }
+        case .unknownDevice:
+            wantConnected = false
+            state = .failed(HandshakeError.unknownDevice.localizedDescription)
+            onUnpaired?()
+        case .failed(let e):
+            state = .failed(e)
+            scheduleReconnect()
+        }
+    }
+
+    private func open(host: String, creds: MacCredentials) async throws -> Opened {
+        guard let url = LoopMeEndpoint.url(host: host, port: creds.port, relay: creds.relay, kind: .session) else { throw HandshakeError.badHello }
         let ws = session.webSocketTask(with: url)
         ws.maximumMessageSize = 32 << 20
         ws.resume()
@@ -177,18 +240,7 @@ public final class LoopMeConnection {
         }
         let key = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: priv)
         let keys = try LoopMeCrypto.sessionKeys(privateKey: key, peerPublicKey: macPub, clientNonce: nonce, serverNonce: sn)
-        guard gen == generation else {
-            ws.cancel(with: .goingAway, reason: nil)
-            return
-        }
-        socket = ws
-        sealer = FrameSealer(key: keys.c2s)
-        opener = FrameOpener(key: keys.s2c)
-        retryDelay = 1
-        state = .connected
-        onConnectedHost?(host)
-        receiveTask = Task { await self.receiveLoop(ws, gen) }
-        pingTask = Task { await self.pingLoop(gen) }
+        return Opened(ws: ws, sealer: FrameSealer(key: keys.c2s), opener: FrameOpener(key: keys.s2c))
     }
 
     private func receiveLoop(_ ws: URLSessionWebSocketTask, _ gen: Int) async {
@@ -268,5 +320,42 @@ public final class LoopMeConnection {
         let waiting = pending
         pending = [:]
         for (_, c) in waiting { c.resume(throwing: RPCError(message: reason)) }
+    }
+}
+
+/// First result wins; the rest are dropped. Only touched from main-actor tasks.
+private final class Race<T>: @unchecked Sendable {
+    private var cont: CheckedContinuation<T, Never>?
+    private var remaining: Int
+    private var errors: [String] = []
+    private let failed: ([String]) -> T
+
+    var done: Bool { cont == nil }
+
+    init(_ cont: CheckedContinuation<T, Never>, count: Int, failed: @escaping ([String]) -> T) {
+        self.cont = cont
+        remaining = count
+        self.failed = failed
+        if count == 0 { finish(failed(["没有可用的地址"])) }
+    }
+
+    /// Returns false when someone already won.
+    func win(_ v: T) -> Bool {
+        remaining -= 1
+        guard cont != nil else { return false }
+        finish(v)
+        return true
+    }
+
+    func lost(_ error: String?) {
+        remaining -= 1
+        if let error { errors.append(error) }
+        if remaining <= 0, cont != nil { finish(failed(errors)) }
+    }
+
+    private func finish(_ v: T) {
+        let c = cont
+        cont = nil
+        c?.resume(returning: v)
     }
 }

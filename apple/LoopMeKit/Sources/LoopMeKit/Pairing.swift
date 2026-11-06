@@ -2,13 +2,15 @@ import CryptoKit
 import Foundation
 
 /// The content of the QR code shown on the Mac:
-/// `loopme://pair?v=1&k=<mac public key>&c=<code>&h=<host,host>&p=<port>&n=<mac name>`.
+/// `loopme://pair?v=2&k=<mac public key>&c=<code>&h=<host,host>&p=<port>&n=<mac name>&r=<mac id>&t=<relay token>&f=<cert sha256>`.
+/// v1 links (no `r`) connect to the daemon directly.
 public struct PairingLink: Equatable {
     public var macPublicKey: Data
     public var code: String
     public var hosts: [String]
     public var port: Int
     public var macName: String
+    public var relay: RelayInfo?
 
     public init?(string: String) {
         guard let comps = URLComponents(string: string.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -27,6 +29,9 @@ public struct PairingLink: Equatable {
         } else {
             macName = "Mac"
         }
+        if let r = q["r"], !r.isEmpty, let t = q["t"], !t.isEmpty {
+            relay = RelayInfo(macId: r, token: t, fingerprint: q["f"].flatMap { $0.isEmpty ? nil : $0.lowercased() })
+        }
     }
 }
 
@@ -40,14 +45,17 @@ public struct MacCredentials: Codable, Equatable {
     public var macName: String
     public var hosts: [String]
     public var port: Int
+    /// Set for v2 pairings: connect through the relay. `nil` = direct (the Mac app, or an old pairing).
+    public var relay: RelayInfo?
 
-    public init(deviceId: String, privateKey: String, macPublicKey: String, macName: String, hosts: [String], port: Int) {
+    public init(deviceId: String, privateKey: String, macPublicKey: String, macName: String, hosts: [String], port: Int, relay: RelayInfo? = nil) {
         self.deviceId = deviceId
         self.privateKey = privateKey
         self.macPublicKey = macPublicKey
         self.macName = macName
         self.hosts = hosts
         self.port = port
+        self.relay = relay
     }
 
     /// Reads the file the daemon writes for the Mac app (`local-client.json`).
@@ -76,7 +84,7 @@ public enum PairingError: LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .unreachable(let s): return "连不上 Mac：\(s)。请确认手机已连上公司 VPN 或与 Mac 在同一网络。"
+        case .unreachable(let s): return "连不上 Mac：\(s)。请确认手机已连上公司 VPN；还不行就在「设置 → 连接诊断」里看原因。"
         case .rejected(let s): return s
         case .sasMismatch: return "校验码不一致，已中止配对。"
         case .protocolError: return "Mac 返回了无法识别的数据。"
@@ -90,9 +98,11 @@ public enum LoopMePairing {
         let key = Curve25519.KeyAgreement.PrivateKey()
         let pub = key.publicKey.rawRepresentation
         var lastError = "没有可用的地址"
+        let session = LoopMeEndpoint.session(pinning: link.relay?.fingerprint)
+        defer { session.finishTasksAndInvalidate() }
         for host in link.hosts {
-            guard let url = URL(string: "ws://\(host):\(link.port)/v1/pair") else { continue }
-            let task = URLSession.shared.webSocketTask(with: url)
+            guard let url = LoopMeEndpoint.url(host: host, port: link.port, relay: link.relay, kind: .pair) else { continue }
+            let task = session.webSocketTask(with: url)
             task.resume()
             do {
                 let hello: [String: Any] = ["t": "pair", "code": link.code, "devicePub": pub.base64EncodedString(), "deviceName": deviceName]
@@ -121,7 +131,8 @@ public enum LoopMePairing {
                                       macPublicKey: link.macPublicKey.base64EncodedString(),
                                       macName: done["macName"] as? String ?? link.macName,
                                       hosts: hosts,
-                                      port: link.port)
+                                      port: link.port,
+                                      relay: link.relay)
             } catch let e as PairingError {
                 throw e
             } catch {

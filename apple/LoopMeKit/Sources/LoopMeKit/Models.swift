@@ -153,6 +153,8 @@ public struct Settings: Codable, Equatable {
     public var codexHooks: Bool = false
     public var ignoredDirs: [String] = []
     public var remoteApprovals: Bool = true
+    /// Addresses put first in the pairing QR code (e.g. a fixed intranet name for this Mac).
+    public var relayHosts: [String] = []
     public var codexPath: String?
     public var model: String?
     public var limits = Limits()
@@ -191,7 +193,13 @@ public struct Status: Codable, Equatable {
     public var hooks: String = "off"
     public var pushConfigured: Bool = false
     public var listenPort: Int = 7788
+    /// Addresses in the pairing QR code.
     public var hosts: [String] = []
+    /// The relay phones connect through: `off`, `connecting`, `on` or `error`.
+    public var relay: String = "off"
+    /// The port phones use.
+    public var relayPort: Int = 8443
+    public var relayFingerprint: String?
     public init() {}
 }
 

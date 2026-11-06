@@ -99,25 +99,53 @@ public struct DecisionCard: View {
         }
     }
 
+    @State private var showAllDetail = false
+
+    private var isApproval: Bool { decision.kind.hasSuffix("pproval") }
+    private var pending: Bool { decision.status == "pending" }
+
     public var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label(kindLabel, systemImage: "hand.raised.fill")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(decision.status == "pending" ? Theme.warning : Theme.secondary)
-            Text(decision.title).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.text)
-            if !decision.detail.isEmpty {
-                Text(decision.detail)
-                    .font(decision.kind.hasSuffix("pproval") ? .system(.footnote, design: .monospaced) : .footnote)
-                    .foregroundStyle(Theme.secondary)
-                    .textSelection(.enabled)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: isApproval ? "lock.shield.fill" : "hand.raised.fill")
+                Text(kindLabel)
+                Spacer(minLength: 8)
+                if pending && decision.kind != "sessionApproval" {
+                    Text("\(Fmt.relative(decision.expiresAt))过期").foregroundStyle(Theme.secondary).fontWeight(.regular)
+                }
             }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(pending ? Theme.warning : Theme.secondary)
+            Text(decision.title).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.text)
+            if !decision.detail.isEmpty { detail }
             footer
         }
         .loopmeCard()
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(decision.status == "pending" ? Theme.warning.opacity(0.5) : Color.clear, lineWidth: 1)
+                .stroke(pending ? Theme.warning.opacity(0.45) : Color.clear, lineWidth: 1)
         )
+    }
+
+    /// Commands and paths in a quiet box, folded after six lines.
+    @ViewBuilder private var detail: some View {
+        let long = decision.detail.split(separator: "\n", omittingEmptySubsequences: false).count > 6 || decision.detail.count > 320
+        VStack(alignment: .leading, spacing: 6) {
+            Text(decision.detail)
+                .font(isApproval ? .system(.footnote, design: .monospaced) : .footnote)
+                .foregroundStyle(Theme.secondary)
+                .lineLimit(showAllDetail || !long ? nil : 6)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if long {
+                Button(showAllDetail ? "收起" : "展开全部") { withAnimation(.easeOut(duration: 0.2)) { showAllDetail.toggle() } }
+                    .font(.caption.weight(.semibold))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.accent)
+            }
+        }
+        .padding(isApproval ? 10 : 0)
+        .background(isApproval ? Theme.subtleFill : Color.clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private var resultText: String {
@@ -129,25 +157,26 @@ public struct DecisionCard: View {
     }
 
     @ViewBuilder private var footer: some View {
-        if decision.status == "pending" {
-            DecisionButtons(decision: decision, showExpiry: true)
+        if pending {
+            DecisionButtons(decision: decision)
         } else {
             Label(resultText, systemImage: decision.status == "approved" ? "checkmark.circle.fill" : "xmark.circle")
                 .font(.caption.weight(.medium))
                 .foregroundStyle(decision.status == "approved" ? Theme.green : Theme.secondary)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(Theme.subtleFill, in: Capsule())
         }
     }
 }
 
-/// 同意 / 拒绝 (and 回 Mac 再说 for the user's own Codex), with the in-flight state.
+/// 拒绝 / 同意 as two equal buttons (and 回 Mac 再说 under them for the user's own Codex), with the in-flight state.
 public struct DecisionButtons: View {
     @EnvironmentObject var store: LoopMeStore
     let decision: Decision
-    var showExpiry = false
+    @State private var tapped = 0
 
     public init(decision: Decision, showExpiry: Bool = false) {
         self.decision = decision
-        self.showExpiry = showExpiry
     }
 
     private func label(_ choice: String) -> String {
@@ -158,34 +187,48 @@ public struct DecisionButtons: View {
         }
     }
 
+    private func answer(_ choice: String) {
+        tapped += 1
+        store.answer(decision, choice: choice)
+    }
+
     public var body: some View {
-        if let choice = store.answering[decision.id] {
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text("已发送：\(label(choice))，等 Mac 确认").font(.caption).foregroundStyle(Theme.secondary)
-            }
-        } else {
-            VStack(alignment: .leading, spacing: 6) {
+        Group {
+            if let choice = store.answering[decision.id] {
                 HStack(spacing: 8) {
-                    Button("同意") { store.answer(decision, choice: "approve") }.buttonStyle(PillButtonStyle())
-                    Button("拒绝") { store.answer(decision, choice: "reject") }.buttonStyle(PillButtonStyle(prominent: false))
+                    ProgressView().controlSize(.small)
+                    Text("已选「\(label(choice))」，等 Mac 确认").font(.caption).foregroundStyle(Theme.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 40)
+                .background(Theme.subtleFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            } else {
+                VStack(spacing: 8) {
+                    HStack(spacing: 10) {
+                        Button { answer("reject") } label: { Label("拒绝", systemImage: "xmark") }
+                            .buttonStyle(ActionButtonStyle(.secondary))
+                        Button { answer("approve") } label: { Label("同意", systemImage: "checkmark") }
+                            .buttonStyle(ActionButtonStyle(.primary))
+                    }
                     if decision.kind == "sessionApproval" {
-                        Button("回 Mac 再说") { store.answer(decision, choice: "later") }
-                            .buttonStyle(.plain)
-                            .font(.subheadline)
-                            .foregroundStyle(Theme.secondary)
+                        Button { answer("later") } label: {
+                            Label("回 Mac 再说", systemImage: "desktopcomputer").font(.caption.weight(.medium))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 2)
                     }
-                    Spacer(minLength: 0)
-                    if showExpiry && decision.kind != "sessionApproval" {
-                        Text("\(Fmt.relative(decision.expiresAt))过期").font(.caption2).foregroundStyle(Theme.secondary)
+                    if !store.isConnected {
+                        Text("Mac 不可达，暂时不能回答").font(.caption2).foregroundStyle(Theme.secondary)
                     }
                 }
-                if !store.isConnected {
-                    Text("Mac 不可达，暂时不能回答").font(.caption2).foregroundStyle(Theme.secondary)
-                }
+                .disabled(!store.isConnected)
+                .opacity(store.isConnected ? 1 : 0.5)
             }
-            .disabled(!store.isConnected)
         }
+        #if os(iOS)
+        .sensoryFeedback(.impact(weight: .medium), trigger: tapped)
+        #endif
     }
 }
 
