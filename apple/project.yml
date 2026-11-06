@@ -14,7 +14,7 @@ settings:
     DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Automatic
     MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "7"
+    CURRENT_PROJECT_VERSION: "8"
     ENABLE_USER_SCRIPT_SANDBOXING: NO
 packages:
   LoopMeKit:
@@ -50,9 +50,11 @@ targets:
         UIBackgroundModes: [remote-notification]
         NSCameraUsageDescription: 扫描 Mac 上显示的二维码来完成配对。
         NSLocalNetworkUsageDescription: 通过局域网或公司 VPN 连接你的 Mac。
+        # Relay addresses are dynamic and may be public-range IPs behind a VPN.
+        # NSAllowsLocalNetworking would override this exception and prevent custom trust.
+        # PinnedTrust still requires the certificate fingerprint saved during pairing.
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
-          NSAllowsLocalNetworking: true
         CFBundleURLTypes:
           - CFBundleURLName: com.sailfishc.loopme.pair
             CFBundleURLSchemes: [loopme]
