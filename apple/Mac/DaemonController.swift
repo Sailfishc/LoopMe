@@ -25,6 +25,15 @@ final class DaemonController: ObservableObject {
     func start(store: LoopMeStore) {
         self.store = store
         try? FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+        if let pid = runningDaemonPid(), let old = staleBuild() {
+            // A daemon from before an update (the app was killed and skipped its own shutdown): replace it.
+            state = "替换旧版本 daemon（\(old)）"
+            Task { @MainActor in
+                await terminate(pid)
+                launch()
+            }
+            return
+        }
         if let pid = runningDaemonPid() {
             external = true
             state = "已在运行（pid \(pid)）"
@@ -59,6 +68,25 @@ final class DaemonController: ObservableObject {
         return Bundle.main.url(forResource: "loopme-daemon", withExtension: nil)
     }
 
+    static var appBuild: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "" }
+
+    /// The build of a daemon started by another version of this app, or nil when it is ours
+    /// (or was started by hand, which writes no build file).
+    private func staleBuild() -> String? {
+        let f = dataDirectory.appendingPathComponent("daemon.build")
+        guard let b = try? String(contentsOf: f, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+              !b.isEmpty, b != Self.appBuild else { return nil }
+        return b
+    }
+
+    private func terminate(_ pid: Int32) async {
+        kill(pid, SIGTERM)
+        for _ in 0..<30 where kill(pid, 0) == 0 {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+    }
+
     /// The pid written by a live daemon for this data directory.
     private func runningDaemonPid() -> Int32? {
         let pidFile = dataDirectory.appendingPathComponent("daemon.pid")
@@ -88,6 +116,7 @@ final class DaemonController: ObservableObject {
         p.arguments = ["--data-dir", dataDirectory.path]
         var env = ProcessInfo.processInfo.environment
         env["RUST_LOG"] = env["RUST_LOG"] ?? "info"
+        env["LOOPME_APP_BUILD"] = Self.appBuild
         p.environment = env
         if !FileManager.default.fileExists(atPath: logURL.path) {
             FileManager.default.createFile(atPath: logURL.path, contents: nil)

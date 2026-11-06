@@ -92,6 +92,14 @@ async fn main() -> Result<()> {
     app.ensure_local_client()?;
     let pid_file = data_dir.join("daemon.pid");
     std::fs::write(&pid_file, std::process::id().to_string())?;
+    // The Mac app passes its build number, so after an update it can tell an old daemon from its own.
+    let build_file = data_dir.join("daemon.build");
+    match std::env::var("LOOPME_APP_BUILD") {
+        Ok(b) if !b.is_empty() => std::fs::write(&build_file, b)?,
+        _ => {
+            let _ = std::fs::remove_file(&build_file);
+        }
+    }
     tracing::info!("data dir {}", data_dir.display());
 
     // Phones reach the Mac through a relay; the daemon itself only listens locally.
@@ -141,5 +149,6 @@ async fn main() -> Result<()> {
     // Dropping the codex client kills the app-server child.
     *app.engine.codex.lock().await = None;
     let _ = std::fs::remove_file(&pid_file);
+    let _ = std::fs::remove_file(&build_file);
     Ok(())
 }

@@ -55,6 +55,31 @@ iOS 版走 TestFlight。Mac 版不能上 TestFlight（要求 App 沙盒，而 Lo
    `apple/build/updates/` 会保留所有发过的 zip，`generate_appcast` 每次根据它重新生成 `appcast.xml`（也会生成增量包）。不设 `UPLOAD_CMD` 时，脚本最后会提示要上传哪些文件。
 3. 第一次安装需要手动分发 zip。之后每台 Mac 会在一天内收到更新提示，也可以在菜单里点「检查更新…」。
 
+## 交给发版流程的约定
+
+上传 CDN 和发版自动化由另一边负责。App 和它之间只靠下面这些约定，改动前要两边对齐：
+
+| 约定 | 内容 |
+| --- | --- |
+| Feed 地址 | `LOOPME_UPDATE_FEED_URL`，写进 App 后就固定了。已安装的 App 只会去这个地址找更新，**发布后不要改**；要换地址，得先发一个指向新地址的版本 |
+| 目录 | `appcast.xml` 和各版本 zip 放在同一目录（或 `DOWNLOAD_URL_PREFIX` 指向的目录）。旧 zip 保留，增量包要靠它们 |
+| 文件 | `LoopMe-<版本>-<build>.zip`（ditto 打包、已公证并 staple 的 `LoopMe.app`）、`appcast.xml`（`generate_appcast` 生成并用 EdDSA 签名）、可选的同名 `.txt` 更新说明、`*.delta` 增量包 |
+| 版本号 | 每次发布 `CURRENT_PROJECT_VERSION` 必须变大，Sparkle 只比较它 |
+| 上传顺序 | 先传 zip 和 delta，最后传 `appcast.xml`，避免 App 读到新 appcast 时 zip 还不存在 |
+| 缓存 | `appcast.xml` 在 CDN 上的缓存不要超过 10 分钟（或上传后主动刷新），zip 可以长期缓存（文件名带版本，不会被覆盖） |
+| 访问 | HTTPS；只需要内网和 VPN 能访问，不要求鉴权（Sparkle 不带凭据） |
+| 接入点 | `release-mac.sh` 的 `UPLOAD_CMD`，执行时环境变量 `UPDATES_DIR` 指向要同步的目录 |
+| 密钥 | Sparkle 私钥只在发版那台 Mac 的钥匙串里（或 `generate_appcast --ed-key-file` 指向的文件，不进仓库） |
+
+## 更新时 App 做了什么
+
+1. Sparkle 下载、校验签名后，安装前先停掉 daemon（它的 Relay 子进程跟着退出）。
+2. 新 App 启动新 daemon，并把自己的 build 号通过 `LOOPME_APP_BUILD` 传给它，daemon 写到 `daemon.build`。
+3. 如果 App 曾被强制退出，旧 daemon 还在跑，新 App 看到 `daemon.build` 不是自己的版本，会先结束旧 daemon 再启动新的。手动用 `cargo run` 起的 daemon 不写这个文件，不受影响。
+4. Relay 子进程监听 daemon 的标准输入，daemon 一旦退出（包括被强杀），Relay 也退出，不会占着 8443 端口。
+
+Mac 面板底部显示当前版本，可以手动「检查更新」，也可以打开「自动安装更新」（下载后在退出时静默安装，默认关闭）。
+
 ## 注意
 
 - iOS 和 Mac 共用 `CURRENT_PROJECT_VERSION`，只增不减即可。

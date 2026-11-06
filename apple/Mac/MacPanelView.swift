@@ -246,6 +246,22 @@ struct MacPanelView: View {
                 }
                 launchAtLogin = SMAppService.mainApp.status == .enabled
             }))
+            if updater.enabled {
+                toggleRow("自动检查更新", isOn: Binding(get: { updater.automaticallyChecks }, set: { updater.automaticallyChecks = $0 }))
+                toggleRow("自动安装更新", isOn: Binding(get: { updater.automaticallyInstalls }, set: { updater.automaticallyInstalls = $0 }))
+                    .disabled(!updater.automaticallyChecks)
+            }
+            HStack {
+                Text("版本 \(AppUpdater.versionText)").foregroundStyle(Theme.secondary)
+                Spacer()
+                if updater.enabled {
+                    Button("检查更新") { updater.checkForUpdates() }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.accent)
+                        .disabled(!updater.canCheck)
+                }
+            }
+            .font(.caption)
         }
         .toggleStyle(.switch)
         .controlSize(.small)

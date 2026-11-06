@@ -30,6 +30,25 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, SPUStand
         controller?.checkForUpdates(nil)
     }
 
+    /// 每天自动检查 (on by default).
+    var automaticallyChecks: Bool {
+        get { controller?.updater.automaticallyChecksForUpdates ?? false }
+        set { controller?.updater.automaticallyChecksForUpdates = newValue; objectWillChange.send() }
+    }
+
+    /// 自动下载并在退出时安装, without asking (off by default).
+    var automaticallyInstalls: Bool {
+        get { controller?.updater.automaticallyDownloadsUpdates ?? false }
+        set { controller?.updater.automaticallyDownloadsUpdates = newValue; objectWillChange.send() }
+    }
+
+    var lastCheck: Date? { controller?.updater.lastUpdateCheckDate }
+
+    static var versionText: String {
+        let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        return "\(v) (\(DaemonController.appBuild))"
+    }
+
     // The new app brings a new daemon: stop the running one before the bundle is replaced.
     nonisolated func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {
         Task { @MainActor in self.daemon?.stop() }

@@ -80,6 +80,8 @@ pub struct Config {
     pub dir: PathBuf,
     /// Tokens accepted for `/v1/mac` on the public port.
     pub mac_tokens: Vec<String>,
+    /// Exit when stdin closes (the daemon that started us is gone).
+    pub exit_with_parent: bool,
 }
 
 struct MacEntry {
@@ -151,6 +153,7 @@ pub fn parse_args(args: &[String], default_dir: PathBuf) -> Result<Config> {
             .ok()
             .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect())
             .unwrap_or_default(),
+        exit_with_parent: false,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -160,6 +163,7 @@ pub fn parse_args(args: &[String], default_dir: PathBuf) -> Result<Config> {
             "--mac-listen" => cfg.mac_listen = Some(val()?.parse().context("bad --mac-listen")?),
             "--data-dir" => cfg.dir = PathBuf::from(val()?),
             "--no-tls" => cfg.tls = false,
+            "--exit-with-parent" => cfg.exit_with_parent = true,
             other => bail!("unknown relay argument {other}"),
         }
     }
@@ -167,6 +171,15 @@ pub fn parse_args(args: &[String], default_dir: PathBuf) -> Result<Config> {
 }
 
 pub async fn run(cfg: Config) -> Result<()> {
+    if cfg.exit_with_parent {
+        tokio::spawn(async {
+            let mut stdin = tokio::io::stdin();
+            let mut buf = [0u8; 64];
+            while matches!(stdin.read(&mut buf).await, Ok(n) if n > 0) {}
+            tracing::info!("daemon is gone; relay exiting");
+            std::process::exit(0);
+        });
+    }
     let state = Arc::new(State::default());
     let tls = if cfg.tls { Some(tls_acceptor(&cfg.dir)?) } else { None };
     if let Some(fp) = fingerprint_file(&cfg.dir).filter(|_| cfg.tls) {

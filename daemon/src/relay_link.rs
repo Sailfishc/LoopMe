@@ -146,10 +146,14 @@ pub async fn supervise_local(data_dir: PathBuf, public_port: u16, mac_port: u16)
             .args(["--data-dir", &data_dir.display().to_string()])
             .args(["--listen", &format!("0.0.0.0:{public_port}")])
             .args(["--mac-listen", &format!("127.0.0.1:{mac_port}")])
+            .arg("--exit-with-parent")
+            // The relay exits when this pipe closes, so it never outlives the daemon (even after SIGKILL).
+            .stdin(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn();
         match child {
             Ok(mut c) => {
+                let _keep_open = c.stdin.take();
                 let st = c.wait().await;
                 tracing::warn!("relay exited: {st:?}");
             }
