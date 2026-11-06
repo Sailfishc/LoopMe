@@ -92,6 +92,49 @@ async def codex_hooks_flow(daemon, data, codex_home, mac, phone):
     print("codex hooks removed OK")
 
 
+def healthz(port, query=""):
+    import hashlib, http.client, ssl
+    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+    c = http.client.HTTPSConnection("127.0.0.1", port, context=ctx, timeout=5)
+    c.request("GET", "/healthz" + query)
+    fp = hashlib.sha256(c.sock.getpeercert(binary_form=True)).hexdigest()
+    body = json.loads(c.getresponse().read())
+    c.close()
+    return body, fp
+
+
+async def relay_checks(data, relay_port, mac):
+    snap = await mac.call("sync")
+    st = snap["status"]
+    assert st["relay"] == "on" and st["relayPort"] == relay_port, st
+    body, fp = await asyncio.to_thread(healthz, relay_port)
+    assert body["ok"] and "macOnline" not in body, body
+    assert fp == st["relayFingerprint"], (fp, st["relayFingerprint"])
+    # The daemon itself no longer listens on the network.
+    assert snap["status"]["listenPort"] == 17788
+    print("relay up, certificate pinned by fingerprint OK")
+
+
+async def relay_auth_checks(phone_state):
+    r = phone_state["relay"]
+    body, _ = await asyncio.to_thread(healthz, phone_state["port"], f"?mac={r['macId']}&t={r['token']}")
+    assert body["macOnline"] is True, body
+    body, _ = await asyncio.to_thread(healthz, phone_state["port"], f"?mac={r['macId']}&t=wrong")
+    assert body["macOnline"] is False, body
+    bad = dict(r, token="x" * 24)
+    ws = await lc.open_ws(lc.endpoint("127.0.0.1", phone_state["port"], bad, "session"), bad)
+    err = json.loads(await ws.recv())
+    assert err["code"] == "bad_token", err
+    await ws.close()
+    pinned_wrong = dict(r, fingerprint="0" * 64)
+    try:
+        await lc.open_ws(lc.endpoint("127.0.0.1", phone_state["port"], pinned_wrong, "session"), pinned_wrong)
+        raise AssertionError("wrong fingerprint must be refused")
+    except RuntimeError:
+        pass
+    print("relay rejects wrong token and wrong certificate OK")
+
+
 async def main():
     daemon = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "daemon/target/debug/loopme-daemon")
     data = tempfile.mkdtemp(prefix="loopme-e2e-")
@@ -102,7 +145,8 @@ async def main():
     # The user is away from the Mac, so signals reach the phone.
     os.makedirs(data, exist_ok=True)
     open(os.path.join(data, "presence"), "w").write("away")
-    proc = subprocess.Popen([daemon, "--data-dir", data, "--port", str(port), "--bind", "127.0.0.1"], env=env)
+    relay_port = 18443
+    proc = subprocess.Popen([daemon, "--data-dir", data, "--port", str(port), "--relay-port", str(relay_port)], env=env)
     try:
         for _ in range(50):
             if os.path.exists(os.path.join(data, "local-client.json")):
@@ -112,6 +156,11 @@ async def main():
         mac = await lc.connect_local(data)
         snap = await mac.call("sync")
         assert snap["status"]["listenPort"] == port
+        for _ in range(50):
+            if (await mac.call("sync"))["status"]["relay"] == "on":
+                break
+            await asyncio.sleep(0.1)
+        await relay_checks(data, relay_port, mac)
 
         # Pairing: QR -> phone -> SAS -> confirm on Mac.
         st = await mac.call("pairing.start")
@@ -119,9 +168,12 @@ async def main():
             ev = await mac.wait_event(lambda e: e["event"] == "pairing" and e["data"]["state"] == "confirm")
             assert ev["data"]["sas"] == code
             await mac.call("pairing.confirm", {"accept": True})
+        assert "&r=" in st["url"] and "&f=" in st["url"], st["url"]
         phone_state = await lc.pair(st["url"], confirm)
+        assert phone_state["relay"]["fingerprint"]
         phone = await lc.connect_state(phone_state)
-        print("paired + encrypted session OK")
+        print("paired + encrypted session through the relay OK")
+        await relay_auth_checks(phone_state)
 
         # Non-local devices cannot use admin methods.
         try:

@@ -43,8 +43,36 @@ def sas(mac_pub, dev_pub):
 
 def parse_pair_url(url):
     q = {k: v[0] for k, v in parse_qs(urlparse(url).query).items()}
-    return {"macPub": b64d(q["k"]), "code": q["c"], "hosts": q["h"].split(","), "port": int(q["p"]),
+    info = {"macPub": b64d(q["k"]), "code": q["c"], "hosts": q["h"].split(","), "port": int(q["p"]),
             "name": b64d(q.get("n", "")).decode() if q.get("n") else "Mac"}
+    if q.get("r"):
+        # v2: through the relay, certificate pinned to f.
+        info["relay"] = {"macId": q["r"], "token": q["t"], "fingerprint": q.get("f")}
+    return info
+
+
+def endpoint(host, port, relay, kind):
+    """URL for `kind` ("pair" or "session") directly or through the relay."""
+    if relay:
+        scheme = "wss" if relay.get("fingerprint") else "ws"
+        return f"{scheme}://{host}:{port}/v1/phone/{relay['macId']}/{kind}?t={relay['token']}"
+    return f"ws://{host}:{port}/v1" + ("/pair" if kind == "pair" else "")
+
+
+async def open_ws(url, relay, **kw):
+    """Opens a WebSocket; with a pinned relay certificate, checks its SHA-256 instead of a CA."""
+    import hashlib, ssl
+    if not url.startswith("wss://"):
+        return await websockets.connect(url, **kw)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    ws = await websockets.connect(url, ssl=ctx, **kw)
+    der = ws.transport.get_extra_info("ssl_object").getpeercert(binary_form=True)
+    if hashlib.sha256(der).hexdigest() != relay["fingerprint"]:
+        await ws.close()
+        raise RuntimeError("relay certificate does not match the pinned fingerprint")
+    return ws
 
 
 class Session:
@@ -55,8 +83,8 @@ class Session:
         self.pending = {}; self.events = asyncio.Queue()
 
     @classmethod
-    async def connect(cls, host, port, device_id, priv, mac_pub):
-        ws = await websockets.connect(f"ws://{host}:{port}/v1", max_size=None)
+    async def connect(cls, host, port, device_id, priv, mac_pub, relay=None):
+        ws = await open_ws(endpoint(host, port, relay, "session"), relay, max_size=None)
         cn = os.urandom(16)
         await ws.send(json.dumps({"t": "hello", "deviceId": device_id, "nonce": b64e(cn)}))
         hello = json.loads(await ws.recv())
@@ -113,7 +141,7 @@ async def pair(url, on_sas=None):
     last = None
     for host in info["hosts"]:
         try:
-            ws = await asyncio.wait_for(websockets.connect(f"ws://{host}:{info['port']}/v1/pair"), 3)
+            ws = await asyncio.wait_for(open_ws(endpoint(host, info["port"], info.get("relay"), "pair"), info.get("relay")), 3)
             break
         except Exception as e:
             last = e
@@ -130,12 +158,13 @@ async def pair(url, on_sas=None):
     if done.get("t") != "paired":
         raise RuntimeError(done)
     return {"deviceId": done["deviceId"], "privateKey": b64e(priv.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())),
-            "macPublicKey": b64e(info["macPub"]), "host": host, "port": info["port"], "sas": pending["sas"]}
+            "macPublicKey": b64e(info["macPub"]), "host": host, "port": info["port"], "sas": pending["sas"],
+            "relay": info.get("relay")}
 
 
 async def connect_state(st):
     priv = X25519PrivateKey.from_private_bytes(b64d(st["privateKey"]))
-    return await Session.connect(st["host"], st["port"], st["deviceId"], priv, b64d(st["macPublicKey"]))
+    return await Session.connect(st["host"], st["port"], st["deviceId"], priv, b64d(st["macPublicKey"]), st.get("relay"))
 
 
 async def main(argv):

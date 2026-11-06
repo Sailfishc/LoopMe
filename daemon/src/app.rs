@@ -77,6 +77,8 @@ pub struct App {
     pub runs: mpsc::UnboundedSender<RunRequest>,
     pub engine: EngineState,
     pub notifier: Notifier,
+    /// How phones reach this Mac when a relay is used (set once at startup).
+    pub relay: Mutex<Option<crate::relay_link::LinkConfig>>,
 }
 
 impl App {
@@ -101,9 +103,11 @@ impl App {
             daemon_version: VERSION.into(),
             agent: "idle".into(),
             hooks: "off".into(),
+            relay: "off".into(),
+            relay_port: port,
             push_configured: notifier.configured(),
             listen_port: port,
-            hosts: advertised_hosts(),
+            hosts: vec![],
             ..Default::default()
         };
         let app = Arc::new(Self {
@@ -118,6 +122,7 @@ impl App {
             runs,
             engine: EngineState::default(),
             notifier,
+            relay: Mutex::new(None),
         });
         Ok((app, rx))
     }
@@ -194,6 +199,45 @@ impl App {
         arrived
     }
 
+    /// Turns the relay on for phones (called once at startup).
+    pub fn use_relay(&self, cfg: crate::relay_link::LinkConfig) {
+        {
+            let mut s = self.status.lock().unwrap();
+            s.relay_port = cfg.public_port;
+            s.relay_fingerprint = crate::relay::fingerprint_file(&self.data_dir);
+        }
+        *self.relay.lock().unwrap() = Some(cfg);
+    }
+
+    pub fn set_relay_status(&self, relay: &str) {
+        {
+            let mut s = self.status.lock().unwrap();
+            if s.relay == relay {
+                return;
+            }
+            s.relay = relay.into();
+            if s.relay_fingerprint.is_none() {
+                s.relay_fingerprint = crate::relay::fingerprint_file(&self.data_dir);
+            }
+        }
+        self.emit_status();
+    }
+
+    /// Addresses for the QR code: manual ones from settings first, then this Mac's (VPN interfaces first).
+    pub fn phone_hosts(&self) -> Vec<String> {
+        let settings = self.store.settings().unwrap_or_default();
+        let mut hosts: Vec<String> = settings.relay_hosts.iter().map(|h| h.trim().to_string()).filter(|h| !h.is_empty()).collect();
+        let remote = self.relay.lock().unwrap().as_ref().map(|c| c.public_hosts.clone()).unwrap_or_default();
+        if remote.is_empty() {
+            hosts.extend(advertised_hosts());
+        } else {
+            hosts.extend(remote);
+        }
+        let mut seen = std::collections::HashSet::new();
+        hosts.retain(|h| seen.insert(h.clone()));
+        hosts
+    }
+
     pub fn set_hooks_status(&self, hooks: &str) {
         {
             let mut s = self.status.lock().unwrap();
@@ -233,7 +277,7 @@ impl App {
         {
             let mut s = self.status.lock().unwrap();
             s.codex = st;
-            s.hosts = advertised_hosts();
+            s.hosts = self.phone_hosts();
             s.push_configured = self.notifier.configured();
         }
         self.emit_status();
@@ -319,15 +363,24 @@ impl App {
 
     pub fn start_pairing(&self) -> PairingState {
         let code = crypto::b64url(&crypto::random_bytes::<9>());
-        let hosts = advertised_hosts();
-        let url = format!(
-            "loopme://pair?v=1&k={}&c={}&h={}&p={}&n={}",
+        let hosts = self.phone_hosts();
+        let relay = self.relay.lock().unwrap().clone();
+        let mut url = format!(
+            "loopme://pair?v={}&k={}&c={}&h={}&p={}&n={}",
+            if relay.is_some() { 2 } else { 1 },
             crypto::b64url(&self.identity.public_bytes()),
             code,
             hosts.join(","),
-            self.port,
+            relay.as_ref().map(|r| r.public_port).unwrap_or(self.port),
             crypto::b64url(mac_name().as_bytes()),
         );
+        if relay.is_some() {
+            // v2: phones go through the relay (`wss://host:p/v1/phone/<r>/…?t=<t>`, certificate pinned to `f`).
+            url.push_str(&format!("&r={}&t={}", crate::relay_link::mac_id(self), crate::relay_link::phone_token(self)));
+            if let Some(fp) = crate::relay::fingerprint_file(&self.data_dir) {
+                url.push_str(&format!("&f={fp}"));
+            }
+        }
         let state = PairingState {
             state: "waiting".into(),
             url: Some(url),
@@ -456,17 +509,19 @@ pub fn advertised_hosts() -> Vec<String> {
         .map(|s| s.split(',').map(|h| h.trim().to_string()).filter(|h| !h.is_empty()).collect())
         .unwrap_or_default();
     if let Ok(ifs) = if_addrs::get_if_addrs() {
-        let mut v4: Vec<String> = ifs
+        // Addresses on VPN interfaces first: a phone on the company VPN is most likely to reach those.
+        let vpn = |name: &str| ["utun", "ppp", "ipsec", "tun", "tap", "wg"].iter().any(|p| name.starts_with(p));
+        let mut v4: Vec<(bool, String)> = ifs
             .iter()
             .filter(|i| !i.is_loopback())
             .filter_map(|i| match i.ip() {
-                std::net::IpAddr::V4(a) if !a.is_link_local() => Some(a.to_string()),
+                std::net::IpAddr::V4(a) if !a.is_link_local() => Some((!vpn(&i.name), a.to_string())),
                 _ => None,
             })
             .collect();
         v4.sort();
         v4.dedup();
-        hosts.extend(v4);
+        hosts.extend(v4.into_iter().map(|(_, a)| a));
     }
     if let Ok(o) = std::process::Command::new("scutil").args(["--get", "LocalHostName"]).output() {
         let s = String::from_utf8_lossy(&o.stdout).trim().to_string();

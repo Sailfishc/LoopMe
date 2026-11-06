@@ -38,7 +38,21 @@ pub async fn serve(app: Arc<App>, bind: SocketAddr) -> Result<()> {
     }
 }
 
-type Ws = tokio_tungstenite::WebSocketStream<TcpStream>;
+type Ws<S> = tokio_tungstenite::WebSocketStream<S>;
+
+/// Bound for the byte streams a session can run over: a direct TCP socket, or
+/// a WebSocket the daemon opened to the relay for one phone.
+pub trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static> Io for T {}
+
+/// Runs the pairing (`/v1/pair`) or session (`/v1`) protocol on an open WebSocket.
+pub async fn serve_ws<S: Io>(app: Arc<App>, ws: Ws<S>, path: &str) -> Result<()> {
+    match path {
+        "/v1/pair" => pair(app, ws).await,
+        "/v1" => session(app, ws).await,
+        _ => Ok(()),
+    }
+}
 
 async fn handle_conn(app: Arc<App>, stream: TcpStream) -> Result<()> {
     let _ = stream.set_nodelay(true);
@@ -48,14 +62,10 @@ async fn handle_conn(app: Arc<App>, stream: TcpStream) -> Result<()> {
         Ok(resp)
     })
     .await?;
-    match path.as_str() {
-        "/v1/pair" => pair(app, ws).await,
-        "/v1" => session(app, ws).await,
-        _ => Ok(()),
-    }
+    serve_ws(app, ws, &path).await
 }
 
-async fn recv_text(ws: &mut Ws, timeout: Duration) -> Result<Value> {
+async fn recv_text<S: Io>(ws: &mut Ws<S>, timeout: Duration) -> Result<Value> {
     loop {
         let msg = tokio::time::timeout(timeout, ws.next()).await.map_err(|_| anyhow!("timeout"))?;
         match msg {
@@ -68,12 +78,12 @@ async fn recv_text(ws: &mut Ws, timeout: Duration) -> Result<Value> {
     }
 }
 
-async fn send_text(ws: &mut Ws, v: Value) -> Result<()> {
+async fn send_text<S: Io>(ws: &mut Ws<S>, v: Value) -> Result<()> {
     ws.send(WsMessage::Text(v.to_string())).await?;
     Ok(())
 }
 
-async fn pair(app: Arc<App>, mut ws: Ws) -> Result<()> {
+async fn pair<S: Io>(app: Arc<App>, mut ws: Ws<S>) -> Result<()> {
     let hello = recv_text(&mut ws, Duration::from_secs(30)).await?;
     let code = hello.get("code").and_then(Value::as_str).unwrap_or("");
     let device_pub = hello.get("devicePub").and_then(Value::as_str).map(crypto::key32).transpose();
@@ -121,7 +131,7 @@ async fn pair(app: Arc<App>, mut ws: Ws) -> Result<()> {
     Ok(())
 }
 
-async fn session(app: Arc<App>, mut ws: Ws) -> Result<()> {
+async fn session<S: Io>(app: Arc<App>, mut ws: Ws<S>) -> Result<()> {
     let hello = recv_text(&mut ws, Duration::from_secs(20)).await?;
     let device_id = hello.get("deviceId").and_then(Value::as_str).unwrap_or("").to_string();
     let client_nonce = hello.get("nonce").and_then(Value::as_str).map(crypto::from_b64).transpose()?.unwrap_or_default();
@@ -397,7 +407,7 @@ async fn handle(ctx: &Ctx, method: &str, p: Value) -> Result<Value> {
             if !["readOnly", "workspace", "full"].contains(&settings.permission_level.as_str()) {
                 bail!("未知权限档位");
             }
-            if !local && (p.get("codexPath").is_some() || p.get("workspaceRoots").is_some() || p.get("ignoredDirs").is_some()) {
+            if !local && (p.get("codexPath").is_some() || p.get("workspaceRoots").is_some() || p.get("ignoredDirs").is_some() || p.get("relayHosts").is_some()) {
                 bail!("这一项只能在 Mac 上修改");
             }
             if !settings.paused {
@@ -407,6 +417,9 @@ async fn handle(ctx: &Ctx, method: &str, p: Value) -> Result<Value> {
             settings.codex_hooks = before.codex_hooks;
             app.store.set_json("settings", &settings)?;
             app.emit("settings", json!(settings));
+            if p.get("relayHosts").is_some() {
+                app.status.lock().unwrap().hosts = app.phone_hosts();
+            }
             app.emit_status();
             if p.get("codexPath").is_some() && p.get("codexPath") != codex_before.as_ref() {
                 *app.engine.codex.lock().await = None;

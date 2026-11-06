@@ -9,6 +9,8 @@ pub mod hooks;
 pub mod model;
 pub mod notify;
 pub mod presence;
+pub mod relay;
+pub mod relay_link;
 pub mod scheduler;
 pub mod server;
 pub mod sessions;

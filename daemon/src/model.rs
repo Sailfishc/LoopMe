@@ -214,6 +214,8 @@ pub struct Settings {
     pub ignored_dirs: Vec<String>,
     /// While the user is away, their Codex permission requests can be answered from the phone.
     pub remote_approvals: bool,
+    /// Extra addresses for the pairing QR code, tried first (e.g. a fixed intranet name for this Mac).
+    pub relay_hosts: Vec<String>,
     pub codex_path: Option<String>,
     pub model: Option<String>,
     pub limits: Limits,
@@ -238,6 +240,7 @@ impl Default for Settings {
             codex_hooks: false,
             ignored_dirs: vec![],
             remote_approvals: true,
+            relay_hosts: vec![],
             codex_path: None,
             model: None,
             limits: Limits::default(),
@@ -285,6 +288,12 @@ pub struct Status {
     pub push_configured: bool,
     pub listen_port: u16,
     pub hosts: Vec<String>,
+    /// Link to the relay phones connect through: `off`, `connecting`, `on` or `error`.
+    pub relay: String,
+    /// The port phones use (the relay's public port, or `listen_port` without a relay).
+    pub relay_port: u16,
+    /// SHA-256 of the relay's certificate, pinned by phones.
+    pub relay_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
