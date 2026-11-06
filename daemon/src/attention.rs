@@ -31,6 +31,9 @@ pub const MAX_INTERRUPTS_PER_DAY: usize = 20;
 pub const STALE_APPROVAL_MS: i64 = 15 * 60 * 1000;
 /// 稍后.
 pub const SNOOZE_MINUTES: i64 = 30;
+/// Codex often asks for one approval after another; one session rings the phone for approvals at most this often.
+/// The requests in between still show up as cards (and can be answered), silently.
+pub const APPROVAL_REPEAT_MS: i64 = 10 * 60 * 1000;
 
 /// `interrupt` for things that need the user, `sync` for results, `None` for everything else.
 pub fn level_for(kind: &str) -> Option<&'static str> {
@@ -90,8 +93,9 @@ pub enum Route {
     Push,
 }
 
-pub fn route(level: &str, at_desk: bool, watching: bool) -> Route {
-    if level != "interrupt" || watching {
+pub fn route(kind: &str, level: &str, at_desk: bool, watching: bool) -> Route {
+    // At the Mac, Codex shows its own approval prompt right where the user works: no extra banner.
+    if level != "interrupt" || watching || (at_desk && kind == "approval") {
         Route::Card
     } else if at_desk {
         Route::Banner
@@ -102,8 +106,13 @@ pub fn route(level: &str, at_desk: bool, watching: bool) -> Route {
 
 /// The rhythm rules for one interrupt. `log` holds the times of recent interrupts and is updated.
 pub fn allow_interrupt(s: &CodexSession, kind: &str, now: i64, log: &mut Vec<i64>) -> bool {
-    // Every approval is a new request that blocks work, so it is never held back.
-    if kind != "approval" {
+    if kind == "approval" {
+        // Approvals block work, so they skip the hourly and daily caps, but a run of them
+        // in one session rings only once per window.
+        if s.alerted_kind.as_deref() == Some("approval") && s.alerted_at.is_some_and(|t| now - t < APPROVAL_REPEAT_MS) {
+            return false;
+        }
+    } else {
         if s.alerted_kind.as_deref() == Some(kind) && s.alerted_at.is_some_and(|t| now - t < REPEAT_MS) {
             return false;
         }
@@ -118,8 +127,9 @@ pub fn allow_interrupt(s: &CodexSession, kind: &str, now: i64, log: &mut Vec<i64
 }
 
 /// Puts `att` on the session and tells the user as loudly as the rules allow. The caller saves the session.
-/// Approval pushes are sent by the decision flow (`sessions::session_approval`), so here they only make a banner.
-pub async fn raise(app: &Arc<App>, s: &mut CodexSession, att: Attention) {
+/// Returns whether the user is to be interrupted. Approval pushes are sent by the decision flow
+/// (`sessions::session_approval`), which asks this first.
+pub async fn raise(app: &Arc<App>, s: &mut CodexSession, att: Attention) -> bool {
     let now = att.at;
     let kind = att.kind.clone();
     let title = format!("{} · {}", label(&kind), project(s));
@@ -128,16 +138,16 @@ pub async fn raise(app: &Arc<App>, s: &mut CodexSession, att: Attention) {
     s.attention = Some(att);
     let at_desk = app.at_desk();
     let watching = at_desk && crate::presence::watching_codex(&app.data_dir);
-    let r = route(&level, at_desk, watching);
+    let r = route(&kind, &level, at_desk, watching);
     if r == Route::Card {
-        return;
+        return false;
     }
     let allowed = {
         let mut log = app.interrupts.lock().unwrap();
         allow_interrupt(s, &kind, now, &mut log)
     };
     if !allowed {
-        return;
+        return false;
     }
     s.alerted_kind = Some(kind.clone());
     s.alerted_at = Some(now);
@@ -148,6 +158,7 @@ pub async fn raise(app: &Arc<App>, s: &mut CodexSession, att: Attention) {
         }
         _ => {}
     }
+    true
 }
 
 /// A stopped session whose look found nothing: the old card (if any) goes away.
@@ -208,10 +219,12 @@ mod tests {
 
     #[test]
     fn routes_by_presence() {
-        assert_eq!(route("sync", false, false), Route::Card);
-        assert_eq!(route("interrupt", false, false), Route::Push);
-        assert_eq!(route("interrupt", true, false), Route::Banner);
-        assert_eq!(route("interrupt", true, true), Route::Card);
+        assert_eq!(route("done", "sync", false, false), Route::Card);
+        assert_eq!(route("stuck", "interrupt", false, false), Route::Push);
+        assert_eq!(route("stuck", "interrupt", true, false), Route::Banner);
+        assert_eq!(route("stuck", "interrupt", true, true), Route::Card);
+        assert_eq!(route("approval", "interrupt", true, false), Route::Card, "Codex asks on the Mac itself");
+        assert_eq!(route("approval", "interrupt", false, false), Route::Push);
     }
 
     #[test]
@@ -228,7 +241,11 @@ mod tests {
         assert!(allow_interrupt(&other, "stuck", 2, &mut log));
         assert!(allow_interrupt(&other, "done", 3, &mut log));
         assert!(!allow_interrupt(&other, "milestone", 4, &mut log), "4 an hour at most");
-        assert!(allow_interrupt(&other, "approval", 5, &mut log), "approvals always pass");
+        assert!(allow_interrupt(&other, "approval", 5, &mut log), "approvals skip the hourly cap");
+        other.alerted_kind = Some("approval".into());
+        other.alerted_at = Some(5);
+        assert!(!allow_interrupt(&other, "approval", 6, &mut log), "a run of approvals rings once");
+        assert!(allow_interrupt(&other, "approval", 5 + APPROVAL_REPEAT_MS, &mut log));
         assert!(allow_interrupt(&other, "stuck", 3600 * 1000 + 10, &mut log), "next hour");
     }
 

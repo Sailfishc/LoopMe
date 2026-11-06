@@ -111,6 +111,10 @@ pub async fn apply_event(app: &Arc<App>, ev: &Value) -> Result<()> {
     }
     s.updated_at = now;
     let away = !app.at_desk();
+    if matches!(event.as_str(), "Stop" | "UserPromptSubmit" | "Interrupt" | "SessionEnd") {
+        // Codex moved on (answered at the Mac, timed out, or interrupted): the phone's card is stale.
+        expire_session_approvals(app, &sid);
+    }
     match event.as_str() {
         "SessionStart" => {
             s.state = "idle".into();
@@ -158,9 +162,11 @@ pub async fn apply_event(app: &Arc<App>, ev: &Value) -> Result<()> {
                 at: now,
                 ..Default::default()
             };
-            crate::attention::raise(app, &mut s, att).await;
+            // A new request means the previous one in this session was settled one way or another.
+            expire_session_approvals(app, &sid);
+            let ring = crate::attention::raise(app, &mut s, att).await;
             if away && settings.remote_approvals {
-                session_approval(app, &s, &event_id, g("toolName"), g("toolInput")).await?;
+                session_approval(app, &s, &event_id, g("toolName"), g("toolInput"), ring).await?;
                 respond(app, &event_id, json!({"wait": true}));
             } else {
                 respond(app, &event_id, json!({"wait": false}));
@@ -183,7 +189,28 @@ fn clear_approval(s: &mut CodexSession) {
     }
 }
 
-async fn session_approval(app: &Arc<App>, s: &CodexSession, event_id: &str, tool: Option<String>, input: Option<String>) -> Result<()> {
+/// Pending phone approvals that belong to this session are no longer waiting.
+fn expire_session_approvals(app: &App, session_id: &str) {
+    for mut d in app.store.pending_decisions().unwrap_or_default() {
+        if d.kind != "sessionApproval" {
+            continue;
+        }
+        let key = format!("decsession:{}", d.id);
+        if app.store.kv_get(&key).ok().flatten().as_deref() != Some(session_id) {
+            continue;
+        }
+        answer_session_approval(app, &d.id, None);
+        let _ = app.store.kv_delete(&key);
+        d.status = "expired".into();
+        d.answered_at = Some(now_ms());
+        let _ = app.store.save_decision(&d);
+        app.emit_decision(&d);
+    }
+}
+
+/// A permission request while the user is away becomes a decision the phone can answer. Only `ring`
+/// requests push (the first of a run in one session); the rest wait silently in the "现在" bar.
+async fn session_approval(app: &Arc<App>, s: &CodexSession, event_id: &str, tool: Option<String>, input: Option<String>, ring: bool) -> Result<()> {
     let project = Path::new(&s.cwd).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let what = input.clone().unwrap_or_else(|| tool.clone().unwrap_or_else(|| "一个操作".into()));
     let title = format!("你的 Codex 想在 {project} 里执行：{}", crate::notify::truncate(&what, 60));
@@ -209,9 +236,12 @@ async fn session_approval(app: &Arc<App>, s: &CodexSession, event_id: &str, tool
     };
     app.store.save_decision(&d)?;
     app.store.kv_set(&format!("hookreq:{}", d.id), event_id)?;
+    app.store.kv_set(&format!("decsession:{}", d.id), &s.id)?;
     app.emit_decision(&d);
-    app.post("system", &title, None, Some(&d.id))?;
-    crate::notify::notify(app, "decision", None, &title, &detail, json!({"decisionId": d.id})).await;
+    // Not posted to the chat: a run of approvals would flood it. The card lives in the "现在" bar.
+    if ring {
+        crate::notify::notify(app, "decision", None, &title, &detail, json!({"decisionId": d.id})).await;
+    }
     Ok(())
 }
 
