@@ -2,7 +2,8 @@
 # Builds, signs, notarizes and publishes a Mac update for Sparkle.
 # See docs/mac-updates.md. Run from anywhere on a Mac with Xcode, xcodegen and Rust.
 #
-# Required environment:
+# Put these in apple/release.env (git-ignored) or the environment.
+# Required:
 #   LOOPME_UPDATE_FEED_URL    where the app looks for updates, e.g. https://files.corp/loopme/appcast.xml
 #   LOOPME_UPDATE_PUBLIC_KEY  Sparkle EdDSA public key (from generate_keys)
 #   NOTARY_PROFILE            notarytool keychain profile (xcrun notarytool store-credentials)
@@ -16,6 +17,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 APPLE="$PWD"
+# Internal addresses and commands live in an untracked file (the repo is open source).
+if [ -f "$APPLE/release.env" ]; then
+  set -a; . "$APPLE/release.env"; set +a
+fi
 : "${LOOPME_UPDATE_FEED_URL:?set LOOPME_UPDATE_FEED_URL}"
 : "${LOOPME_UPDATE_PUBLIC_KEY:?set LOOPME_UPDATE_PUBLIC_KEY}"
 : "${NOTARY_PROFILE:?set NOTARY_PROFILE}"

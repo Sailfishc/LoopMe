@@ -26,6 +26,20 @@ iOS 版走 TestFlight。Mac 版不能上 TestFlight（要求 App 沙盒，而 Lo
    ```
 3. **存储地址**：确定内网上的目录，例如 `https://files.corp.example/loopme/mac/`。`appcast.xml` 和 zip 放在同一目录。
 
+## 开源仓库要注意的
+
+代码公开没关系：更新的安全靠两把不在仓库里的钥匙，一把是 Sparkle 私钥（在你的钥匙串里），一把是 Developer ID 证书。别人 fork 后只能给自己的用户发更新，发不到你的用户手上；就算有人改了 CDN 上的文件，签名对不上，App 也会拒绝安装。
+
+- 不进仓库：Sparkle 私钥及其导出文件、公证凭据、APNs 的 `.p8` 和 `apns.json`（已加入 `.gitignore`）。
+- 内网 CDN 地址和上传命令写在 `apple/release.env`（不提交），脚本会自动读取：
+  ```sh
+  LOOPME_UPDATE_FEED_URL=https://cdn.corp.example/loopme/mac/appcast.xml
+  LOOPME_UPDATE_PUBLIC_KEY=<公钥>
+  NOTARY_PROFILE=loopme-notary
+  UPLOAD_CMD='<同步 "$UPDATES_DIR" 到 CDN 的命令>'
+  ```
+- 公钥、Team ID、Bundle ID 不是秘密，公开没有问题。
+
 ## 发一个版本
 
 1. 在 `apple/project.yml` 里把 `CURRENT_PROJECT_VERSION` 加 1（Sparkle 按它比较新旧），需要时改 `MARKETING_VERSION`。
