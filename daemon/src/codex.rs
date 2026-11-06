@@ -233,7 +233,38 @@ pub fn resolve_codex(setting: Option<&str>) -> Option<PathBuf> {
     for p in ["/opt/homebrew/bin/codex", "/usr/local/bin/codex", "~/.npm-global/bin/codex", "~/.local/bin/codex", "~/.bun/bin/codex"] {
         candidates.push(expand_home(p));
     }
+    // No CLI installed: the Codex desktop app carries the same codex binary.
+    for app in ["/Applications/Codex.app", "~/Applications/Codex.app"] {
+        candidates.extend(bundled_codex(&expand_home(app)));
+    }
     candidates.into_iter().find(|p| p.is_file())
+}
+
+/// `codex` binaries inside an app bundle's `Contents/Resources` (a few levels deep).
+/// Names are compared exactly, so the app's own `Contents/MacOS/Codex` never matches.
+pub fn bundled_codex(app: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let p = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_file() && e.file_name() == "codex" && is_executable(&p) {
+                out.push(p);
+            } else if ft.is_dir() && depth > 0 && !e.file_name().to_string_lossy().ends_with(".app") {
+                walk(&p, depth - 1, out);
+            }
+        }
+    }
+    let mut out = vec![];
+    walk(&app.join("Contents").join("Resources"), 3, &mut out);
+    out
+}
+
+fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
 }
 
 pub fn expand_home(s: &str) -> PathBuf {
@@ -275,4 +306,25 @@ pub async fn probe(setting: Option<&str>) -> CodexStatus {
     })
     .await
     .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_codex_inside_the_desktop_app() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tmp.path().join("Codex.app");
+        let macos = app.join("Contents/MacOS");
+        let res = app.join("Contents/Resources/bin");
+        std::fs::create_dir_all(&macos).unwrap();
+        std::fs::create_dir_all(&res).unwrap();
+        for f in [macos.join("Codex"), res.join("codex"), res.join("codex-helper")] {
+            std::fs::write(&f, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(bundled_codex(&app), vec![res.join("codex")]);
+    }
 }

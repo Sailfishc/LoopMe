@@ -9,7 +9,7 @@
 | Xcode 15.3 及以上（含 iOS 17 SDK） | App Store |
 | Rust（stable） | `curl https://sh.rustup.rs -sSf \| sh` |
 | XcodeGen | `brew install xcodegen` |
-| Codex CLI，并已登录 | `npm i -g @openai/codex` 或 `brew install codex`，然后 `codex login` |
+| Codex CLI 或 Codex App，并已登录 | `npm i -g @openai/codex` 或 `brew install codex`，然后 `codex login`；只装了 Codex App 也可以（LoopMe 会用 App 里自带的 codex） |
 
 ## 1. 先单独跑 daemon（可选，但最快发现问题）
 
@@ -101,7 +101,7 @@ xcrun stapler staple "$APP"
 5. 在手机上发“帮我盯着 xxx”，应看到流式回复和一张事项卡。
 6. 设置页里试“发送测试推送”、改权限档位、编辑记忆。
 7. Mac 面板里点“接入”（让 LoopMe 看到你自己的 Codex 会话）。之后 `~/.codex/hooks.json` 里会多出 LoopMe 的 6 条 hook，面板显示“已接入”。
-8. 在终端里随便开一个 `codex` 会话发一句话，手机顶部的“现在”条会出现“你的 Codex：…”。
+8. 在终端里随便开一个 `codex` 会话发一句话，手机顶部的“现在”条会出现“你的 Codex：…”。再在 Codex App 里发一句，确认 App 的会话也会出现（App 是否执行 `~/.codex/hooks.json` 还待实测）。
 9. 离开 Mac 5 分钟以上（或在数据目录写 `echo away > ~/Library/Application\ Support/LoopMe/presence` 模拟），让 Codex 请求一个需要授权的命令，手机上会出现“你的 Codex 在等授权”。测完删掉 `presence` 文件。
 10. 会话停在失败的测试时（你不在 Mac 前），约 2 分钟后手机上会出现“可以接手”卡片；点“让我来”，结果卡里可以看改动、推送或撤销。你自己的工作区不会被改。
 
@@ -113,6 +113,6 @@ xcrun stapler staple "$APP"
   - 有包但连不上：检查 macOS 防火墙是否允许 `loopme-daemon` 接受连接。
   - IT 给 Mac 分配了固定 IP 或内网域名：填到 Mac 面板「手机连接 → 对外地址」，再重新扫码。临时也可以用环境变量 `LOOPME_HOSTS`。
 - **iOS 提示本地网络权限**：允许即可；拒绝后需要在 设置 → 隐私 → 本地网络 里打开。
-- **Codex 找不到**：daemon 依次查找设置里的路径、`LOOPME_CODEX`、登录 shell 里的 `codex`、`/opt/homebrew/bin`、`/usr/local/bin` 等。
+- **Codex 找不到**：daemon 依次查找设置里的路径、`LOOPME_CODEX`、登录 shell 里的 `codex`、`/opt/homebrew/bin`、`/usr/local/bin` 等，最后是 `/Applications/Codex.app/Contents/Resources` 里自带的 `codex`。CLI 和 App 共用 `~/.codex`（登录、配置、会话、hooks），所以两边的会话 LoopMe 都能看到。
 - **hook 没反应**：看 Mac 面板“你的 Codex 会话”是不是“已接入”；`codex` 版本需要 0.166 以上。Codex 只运行标记过信任的 hook，LoopMe 换位置后会在 10 分钟内自动重新标记，也可以在面板里点“重新接入”。
 - **看日志**：`~/Library/Application Support/LoopMe/daemon.log`，或终端里 `RUST_LOG=debug cargo run`。

@@ -241,11 +241,15 @@ async fn recent_sessions(app: &App, client: &CodexClient) -> Result<String> {
             json!({
                 "limit": 40,
                 "sortKey": "updated_at",
-                "sourceKinds": ["cli", "vscode", "exec"],
+                // CLI, IDE, `codex exec`, and app-server clients such as the Codex desktop app.
+                "sourceKinds": ["cli", "vscode", "exec", "appServer"],
                 "excludedThreadIds": excluded,
             }),
         )
         .await?;
+    // LoopMe's own runs are app-server threads too: drop any the server-side exclusion missed.
+    let own: std::collections::HashSet<String> = app.store.own_codex_threads(2000)?.into_iter().collect();
+    let data_dir = app.data_dir.display().to_string();
     let cutoff = chrono::Utc::now().timestamp() - 7 * 24 * 3600;
     let mut lines = vec![];
     for t in res.get("data").and_then(Value::as_array).cloned().unwrap_or_default() {
@@ -254,13 +258,16 @@ async fn recent_sessions(app: &App, client: &CodexClient) -> Result<String> {
             continue;
         }
         let id = t.get("id").and_then(Value::as_str).unwrap_or_default();
+        let cwd = t.get("cwd").and_then(Value::as_str).unwrap_or("");
+        if own.contains(id) || (!cwd.is_empty() && std::path::Path::new(cwd).starts_with(&data_dir)) {
+            continue;
+        }
         let name = t
             .get("name")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .or_else(|| t.get("preview").and_then(Value::as_str))
             .unwrap_or("");
-        let cwd = t.get("cwd").and_then(Value::as_str).unwrap_or("");
         let branch = t.pointer("/gitInfo/branch").and_then(Value::as_str).unwrap_or("");
         let status = t.pointer("/status/type").and_then(Value::as_str).unwrap_or("");
         lines.push(format!(

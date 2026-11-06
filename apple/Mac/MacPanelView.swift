@@ -138,10 +138,14 @@ struct MacPanelView: View {
                     Button("登录") { store.codexLogin() }.font(.caption.weight(.semibold))
                 }
             } else {
-                Text("\(c.version ?? "已安装") · 就绪").foregroundStyle(Theme.secondary)
+                Text("\(c.version ?? "已安装") · 就绪\(fromApp ? " · 用 Codex App 自带的" : "")").foregroundStyle(Theme.secondary)
+                    .help(c.path ?? "")
             }
         }
     }
+
+    /// No CLI installed: LoopMe runs the codex binary inside Codex.app.
+    private var fromApp: Bool { store.status.codex.path?.contains(".app/") == true }
 
     /// The one-time confirm for watching the user's own Codex sessions.
     @ViewBuilder private var hooksSection: some View {
