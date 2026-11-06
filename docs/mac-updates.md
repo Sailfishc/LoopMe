@@ -20,14 +20,15 @@ iOS 版走 TestFlight。Mac 版不能上 TestFlight（要求 App 沙盒，而 Lo
    ./generate_keys          # 私钥存进你的登录钥匙串，打印公钥
    ./generate_keys -x ~/loopme-sparkle-private-key   # 导出一份备份，放在安全的地方，不要进仓库
    ```
-   把打印出的公钥填到 `apple/project.yml` 的 `LOOPME_UPDATE_PUBLIC_KEY`（公钥不是秘密，可以提交）。私钥丢了，已安装的 App 就再也收不到更新。
+   把打印出的公钥放到已忽略的 `apple/release.env` 的 `LOOPME_UPDATE_PUBLIC_KEY`，不要写入已跟踪的 `project.yml`。发版脚本会把它传入构建；未配置时更新功能保持关闭。私钥丢了，已安装的 App 就再也收不到更新。
 2. **公证凭据**：
    ```sh
    xcrun notarytool store-credentials loopme-notary --apple-id <Apple ID> --team-id 35KYWWD972
    ```
 3. **GitHub CLI**：`brew install gh && gh auth login`，账号要能在本仓库发 Release。
-4. 可选：新建 `apple/release.env`（已在 `.gitignore`）：
+4. 新建 `apple/release.env`（已在 `.gitignore`，公钥和凭据配置都只保存在本地）：
    ```sh
+   LOOPME_UPDATE_PUBLIC_KEY="<generate_keys 输出的公钥>"
    NOTARY_PROFILE=loopme-notary
    ```
 

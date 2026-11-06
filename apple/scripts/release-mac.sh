@@ -3,7 +3,7 @@
 # See docs/mac-updates.md. Run on a Mac with Xcode, xcodegen, Rust and the GitHub CLI (gh, logged in).
 #
 # Settings come from the environment or apple/release.env (git-ignored):
-#   LOOPME_UPDATE_PUBLIC_KEY  Sparkle EdDSA public key (from generate_keys); or set it in project.yml (Release)
+#   LOOPME_UPDATE_PUBLIC_KEY  Sparkle EdDSA public key (from generate_keys); keep in ignored release.env
 #   NOTARY_PROFILE            notarytool keychain profile (xcrun notarytool store-credentials)
 #   GITHUB_REPO               default Sailfishc/LoopMe
 #   RELEASE_NOTES             text shown in the update dialog and on the release page
