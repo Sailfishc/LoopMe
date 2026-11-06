@@ -22,6 +22,11 @@ public struct ChatView: View {
     @State private var openFrom: Int64?
     @State private var showBanner = false
     @FocusState private var inputFocused: Bool
+    #if os(iOS)
+    /// iOS uses a text view that keeps the keyboard up after sending (a recreated field dropped focus,
+    /// the keyboard folded, and the whole chat jumped).
+    @StateObject private var composer = ComposerController()
+    #endif
 
     public init() {}
 
@@ -95,7 +100,7 @@ public struct ChatView: View {
                     if atBottom { scrollToBottom(proxy, animated: false) }
                 }
                 .onChange(of: scrollRequest) { _, _ in scrollToBottom(proxy, animated: true) }
-                .onChange(of: inputFocused) { _, focused in
+                .onChange(of: composerFocused) { _, focused in
                     // The keyboard shrinks the list; keep the newest message above it.
                     guard focused, atBottom else { return }
                     Task {
@@ -209,7 +214,27 @@ public struct ChatView: View {
 
     private func reply(to m: Message) {
         store.replyTo = m
+        #if os(iOS)
+        composer.focus()
+        #else
         inputFocused = true
+        #endif
+    }
+
+    private var composerFocused: Bool {
+        #if os(iOS)
+        composer.isFocused
+        #else
+        inputFocused
+        #endif
+    }
+
+    private var composerText: String {
+        #if os(iOS)
+        composer.text
+        #else
+        draft.text
+        #endif
     }
 
     /// Only after a short grace period: coming back from the lock screen reconnects in about a second,
@@ -274,21 +299,39 @@ public struct ChatView: View {
         .background(Theme.background)
     }
 
-    private var inputRow: some View {
+    @ViewBuilder private var inputField: some View {
+        #if os(iOS)
+        ComposerTextView(controller: composer)
+            .overlay(alignment: .topLeading) {
+                if composer.text.isEmpty {
+                    Text("和 Agent 说点什么")
+                        .foregroundStyle(Theme.secondary)
+                        .padding(.horizontal, 14).padding(.vertical, 10)
+                        .allowsHitTesting(false)
+                }
+            }
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(Theme.border, lineWidth: 1))
+        #else
         let inputID = draft.inputID
         let text = Binding(get: { draft.text }, set: { draft.edit($0, from: inputID) })
-        return HStack(alignment: .bottom, spacing: 10) {
-            TextField("和 Agent 说点什么", text: text, axis: .vertical)
-                .id(inputID)
-                .textFieldStyle(.plain)
-                .lineLimit(1...6)
-                .focused($inputFocused)
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .foregroundStyle(Theme.text)
-                .background(Theme.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(Theme.border, lineWidth: 1))
-                .onSubmit(send)
-            if store.isWorking && draft.text.isEmpty {
+        TextField("和 Agent 说点什么", text: text, axis: .vertical)
+            .id(inputID)
+            .textFieldStyle(.plain)
+            .lineLimit(1...6)
+            .focused($inputFocused)
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .foregroundStyle(Theme.text)
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(Theme.border, lineWidth: 1))
+            .onSubmit(send)
+        #endif
+    }
+
+    private var inputRow: some View {
+        HStack(alignment: .bottom, spacing: 10) {
+            inputField
+            if store.isWorking && composerText.isEmpty {
                 Button(action: { store.stopRun() }) {
                     Image(systemName: "stop.circle.fill").font(.system(size: 30))
                 }
@@ -308,15 +351,21 @@ public struct ChatView: View {
     }
 
     private var canSend: Bool {
-        store.isConnected && !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        store.isConnected && !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func send() {
         guard canSend else { return }
+        #if os(iOS)
+        // Commits the input method's in-progress text, then clears the box; the keyboard stays up.
+        let text = composer.take()
+        if store.send(text) { scrollRequest += 1 }
+        #else
         if store.send(draft.text) {
             draft.sent()
             scrollRequest += 1
         }
+        #endif
     }
 }
 
