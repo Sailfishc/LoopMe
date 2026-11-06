@@ -24,7 +24,7 @@ cargo run -- --data-dir /tmp/loopme-dev --port 7788
 ```bash
 python3 -m pip install websockets cryptography
 LOOPME_CODEX="$PWD/../tools/mock-codex.py" cargo run -- --data-dir /tmp/loopme-dev
-python3 ../tools/e2e_test.py          # 配对、对话、事项、记忆、审批、解除配对，全部自动验证
+python3 ../tools/e2e_test.py          # 配对、对话、事项、记忆、审批、回复引用、Codex hook、代为授权、让我来、解除配对，全部自动验证
 ```
 
 `tools/loopme_client.py` 是协议的参考客户端，可以在命令行里配对、发消息（见文件头说明）。
@@ -100,10 +100,15 @@ xcrun stapler staple "$APP"
 4. 两边会显示同一个 4 位校验码，在 Mac 上点“确认配对”。
 5. 在手机上发“帮我盯着 xxx”，应看到流式回复和一张事项卡。
 6. 设置页里试“发送测试推送”、改权限档位、编辑记忆。
+7. Mac 面板里点“接入”（让 LoopMe 看到你自己的 Codex 会话）。之后 `~/.codex/hooks.json` 里会多出 LoopMe 的 6 条 hook，面板显示“已接入”。
+8. 在终端里随便开一个 `codex` 会话发一句话，手机顶部的“现在”条会出现“你的 Codex：…”。
+9. 离开 Mac 5 分钟以上（或在数据目录写 `echo away > ~/Library/Application\ Support/LoopMe/presence` 模拟），让 Codex 请求一个需要授权的命令，手机上会出现“你的 Codex 在等授权”。测完删掉 `presence` 文件。
+10. 会话停在失败的测试时（你不在 Mac 前），约 2 分钟后手机上会出现“可以接手”卡片；点“让我来”，结果卡里可以看改动、推送或撤销。你自己的工作区不会被改。
 
 ### 常见问题
 
 - **手机连不上 Mac**：二维码里带了 Mac 的所有 IPv4 地址和 `.local` 名称，手机会依次尝试。VPN 地址不在其中时，可以在启动 daemon 前设置环境变量 `LOOPME_HOSTS=10.x.x.x`（多个用逗号分隔），或在终端用 `LOOPME_HOSTS=... cargo run` 启动。另外检查 macOS 防火墙是否允许 `loopme-daemon` 接受连接（端口 7788）。
 - **iOS 提示本地网络权限**：允许即可；拒绝后需要在 设置 → 隐私 → 本地网络 里打开。
 - **Codex 找不到**：daemon 依次查找设置里的路径、`LOOPME_CODEX`、登录 shell 里的 `codex`、`/opt/homebrew/bin`、`/usr/local/bin` 等。
+- **hook 没反应**：看 Mac 面板“你的 Codex 会话”是不是“已接入”；`codex` 版本需要 0.166 以上。Codex 只运行标记过信任的 hook，LoopMe 换位置后会在 10 分钟内自动重新标记，也可以在面板里点“重新接入”。
 - **看日志**：`~/Library/Application Support/LoopMe/daemon.log`，或终端里 `RUST_LOG=debug cargo run`。

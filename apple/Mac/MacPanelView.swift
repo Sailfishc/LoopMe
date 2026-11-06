@@ -19,6 +19,7 @@ struct MacPanelView: View {
             pairingSection
             Divider().overlay(Theme.border)
             codexSection
+            hooksSection
             agentSection
             networkSection
             Divider().overlay(Theme.border)
@@ -142,26 +143,42 @@ struct MacPanelView: View {
         }
     }
 
-    private var agentSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            row(icon: "sparkles", title: "Agent") {
-                HStack(spacing: 6) {
-                    Text(agentText).foregroundStyle(Theme.secondary)
-                    if store.isWorking {
-                        Button("停止") { store.stopRun() }.font(.caption.weight(.semibold))
+    /// The one-time confirm for watching the user's own Codex sessions.
+    @ViewBuilder private var hooksSection: some View {
+        if store.status.codex.found {
+            if store.settings.codexHooks {
+                row(icon: "eye", title: "你的 Codex 会话") {
+                    if store.status.hooks == "on" {
+                        Text("已接入").foregroundStyle(Theme.secondary)
+                    } else {
+                        HStack(spacing: 6) {
+                            Text(store.status.hooks == "error" ? "出错" : "需要确认").foregroundStyle(Theme.warning)
+                            Button("重新接入") { store.enableCodexHooks() }.font(.caption.weight(.semibold))
+                        }
                     }
                 }
-            }
-            if let run = store.status.currentRun {
-                Text(run.title).font(.caption).foregroundStyle(Theme.secondary).lineLimit(1).padding(.leading, 26)
-            }
-            if let t = store.status.nextWakeAt {
-                row(icon: "alarm", title: "下次唤醒") { Text(Fmt.time(t)).foregroundStyle(Theme.secondary) }
-            }
-            if !store.pendingDecisions.isEmpty {
-                row(icon: "hand.raised", title: "需要你") {
-                    Text("\(store.pendingDecisions.count) 件").foregroundStyle(Theme.warning)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("让 LoopMe 看到你自己的 Codex 会话？").font(.subheadline.weight(.semibold)).foregroundStyle(Theme.text)
+                    Text("会话停下、卡住或等授权时，你不在 Mac 前它才来找你。会在 ~/.codex/hooks.json 加几条 hook 并标记信任，只问这一次，可在设置里关掉。")
+                        .font(.caption).foregroundStyle(Theme.secondary)
+                    Button("接入") { store.enableCodexHooks() }
+                        .buttonStyle(PillButtonStyle())
+                        .disabled(!store.isConnected)
                 }
+                .loopmeCard()
+            }
+        }
+    }
+
+    /// The same "现在" list as on the phone.
+    private var agentSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            row(icon: "sparkles", title: "现在") {
+                Text(agentText).foregroundStyle(Theme.secondary)
+            }
+            if store.nowSummary != nil {
+                NowPanel()
             }
         }
     }
@@ -216,7 +233,7 @@ struct MacPanelView: View {
             Button("设置") { open("settings") }
             Spacer()
             Menu {
-                Button("立即整理汇报") { store.briefNow() }
+                Button("现在整理今天的事") { store.briefNow() }
                 Button("重启 daemon") { daemon.restart() }
                 Button("打开日志") { NSWorkspace.shared.open(daemon.logURL) }
                 Button("打开数据目录") { NSWorkspace.shared.open(daemon.dataDirectory) }

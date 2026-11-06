@@ -7,6 +7,7 @@ public struct SettingsForm: View {
     @AppStorage(AppearanceSetting.key) private var appearance = "dark"
     @State private var pushReport: String?
     @State private var confirmUnpair = false
+    @State private var confirmHooks = false
     private let onUnpair: (() -> Void)?
     private let isMac: Bool
 
@@ -20,6 +21,7 @@ public struct SettingsForm: View {
         Form {
             macSection
             permissionSection
+            codexSessionsSection
             notifySection
             chatSection
             Section("记忆与 Profile") {
@@ -65,9 +67,6 @@ public struct SettingsForm: View {
             row("连接", Fmt.connection(store.connection))
             row("Codex", codexText)
             row("Agent", agentText)
-            if let t = store.status.nextWakeAt {
-                row("下次主动工作", Fmt.time(t))
-            }
             Toggle("暂停主动工作", isOn: binding({ store.settings.paused }, { v in store.updateSettings(["paused": v]) }))
         }
     }
@@ -126,9 +125,8 @@ public struct SettingsForm: View {
             Toggle("需要我决定时", isOn: binding({ store.settings.notify.decision }, { v in store.updateSettings(["notify": ["decision": v]]) }))
             Toggle("交代的事有结果时", isOn: binding({ store.settings.notify.result }, { v in store.updateSettings(["notify": ["result": v]]) }))
             Toggle("执行失败需要我介入时", isOn: binding({ store.settings.notify.failure }, { v in store.updateSettings(["notify": ["failure": v]]) }))
-            Toggle("早间汇报", isOn: binding({ store.settings.briefEnabled }, { v in store.updateSettings(["briefEnabled": v, "notify": ["brief": v]]) }))
+            Toggle("每天的第一句话", isOn: binding({ store.settings.briefEnabled }, { v in store.updateSettings(["briefEnabled": v, "notify": ["brief": v]]) }))
             if store.settings.briefEnabled {
-                DatePicker("汇报时间", selection: timeBinding(\.briefTime, key: "briefTime"), displayedComponents: .hourAndMinute)
                 Toggle("只在工作日", isOn: binding({ store.settings.briefWeekdaysOnly }, { v in store.updateSettings(["briefWeekdaysOnly": v]) }))
             }
             DatePicker("安静时段开始", selection: timeBinding(\.quietStart, key: "quietStart"), displayedComponents: .hourAndMinute)
@@ -143,7 +141,51 @@ public struct SettingsForm: View {
         } header: {
             Text("什么时候通知我")
         } footer: {
-            Text("同一事项每天最多提醒 \(store.settings.limits.perItemPerDay) 次，每小时最多 \(store.settings.limits.perHour) 条；安静时段内的通知会在结束后合并发送。关闭“锁屏显示摘要”时，通知只写“你的 Agent 有新消息”。")
+            Text("每天第一次回到 Mac 或打开 App 时，Agent 用一句话告诉你今天有几件事。你在 Mac 前时不推送到手机，只更新菜单栏和“现在”条。同一事项每天最多提醒 \(store.settings.limits.perItemPerDay) 次，每小时最多 \(store.settings.limits.perHour) 条；安静时段内的通知会在结束后合并发送。关闭“锁屏显示摘要”时，通知只写“你的 Agent 有新消息”。")
+        }
+    }
+
+    private var hooksText: String {
+        switch store.status.hooks {
+        case "on": return "已接入"
+        case "untrusted": return "需要重新确认"
+        case "error": return "出错，稍后重试"
+        default: return "未接入"
+        }
+    }
+
+    private var codexSessionsSection: some View {
+        Section {
+            if isMac {
+                Toggle("盯住我自己的 Codex 会话", isOn: binding({ store.settings.codexHooks }, { v in
+                    if v { confirmHooks = true } else { store.disableCodexHooks() }
+                }))
+                .alert("让 LoopMe 看到你自己的 Codex 会话？", isPresented: $confirmHooks) {
+                    Button("接入") { store.enableCodexHooks() }
+                    Button("取消", role: .cancel) {}
+                } message: {
+                    Text("LoopMe 会在 ~/.codex/hooks.json 里加几条 hook，并在 Codex 里标记信任（只做这一次）。之后你的会话开始、停下、等授权时 LoopMe 都能知道。你自己的 hook 不受影响，随时可以在这里关掉。")
+                }
+            }
+            row("状态", hooksText)
+            Toggle("我不在 Mac 前时，授权请求发到手机", isOn: binding({ store.settings.remoteApprovals }, { v in store.updateSettings(["remoteApprovals": v]) }))
+                .disabled(!store.settings.codexHooks)
+            if isMac {
+                FolderListEditor(title: "不看这些文件夹", key: "ignoredDirs", folders: store.settings.ignoredDirs, placeholder: "~/private")
+            } else if !store.settings.ignoredDirs.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("不看这些文件夹").font(.subheadline)
+                    ForEach(store.settings.ignoredDirs, id: \.self) { r in
+                        Text(r).font(.caption.monospaced()).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        } header: {
+            Text("你的 Codex 会话")
+        } footer: {
+            Text(isMac
+                 ? "会话停下、卡住或等授权时，你不在 Mac 前，LoopMe 才会找你；能直接做完的事会问你要不要“让我来”。"
+                 : "在 Mac 上的 LoopMe 设置里开启。会话停下、卡住或等授权时，你不在 Mac 前，LoopMe 才会找你。")
         }
     }
 
@@ -188,28 +230,41 @@ public struct SettingsForm: View {
 /// Mac only: folders the agent may write to.
 struct WorkspaceRootsEditor: View {
     @EnvironmentObject var store: LoopMeStore
-    @State private var newRoot = ""
+
+    var body: some View {
+        FolderListEditor(title: "授权文件夹", key: "workspaceRoots", folders: store.settings.workspaceRoots, placeholder: "~/code/项目")
+    }
+}
+
+/// A list of folders stored in one settings key (Mac only).
+struct FolderListEditor: View {
+    @EnvironmentObject var store: LoopMeStore
+    let title: String
+    let key: String
+    let folders: [String]
+    let placeholder: String
+    @State private var newFolder = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("授权文件夹").font(.subheadline)
-            ForEach(store.settings.workspaceRoots, id: \.self) { r in
+            Text(title).font(.subheadline)
+            ForEach(folders, id: \.self) { r in
                 HStack {
                     Text(r).font(.caption.monospaced())
                     Spacer()
                     Button {
-                        store.updateSettings(["workspaceRoots": store.settings.workspaceRoots.filter { $0 != r }])
+                        store.updateSettings([key: folders.filter { $0 != r }])
                     } label: { Image(systemName: "minus.circle") }
                     .buttonStyle(.plain)
                 }
             }
             HStack {
-                TextField("~/code/项目", text: $newRoot)
+                TextField(placeholder, text: $newFolder)
                 Button("添加") {
-                    let r = newRoot.trimmingCharacters(in: .whitespaces)
+                    let r = newFolder.trimmingCharacters(in: .whitespaces)
                     guard !r.isEmpty else { return }
-                    store.updateSettings(["workspaceRoots": store.settings.workspaceRoots + [r]])
-                    newRoot = ""
+                    store.updateSettings([key: folders + [r]])
+                    newFolder = ""
                 }
             }
         }

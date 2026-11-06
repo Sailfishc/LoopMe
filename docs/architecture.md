@@ -9,7 +9,8 @@ iPhone (LoopMe iOS) ──WebSocket + 端到端加密──┐
                                               ├── loopme-daemon (Rust, 跑在 Mac 上) ── codex app-server (子进程)
 Mac 菜单栏 App ────── 同一协议, 127.0.0.1 ─────┘          │
                                                           ├── SQLite (~/Library/Application Support/LoopMe/loopme.db)
-                                                          └── APNs (直接调用)
+                                                          ├── APNs (直接调用)
+你自己的 Codex 会话 ── hooks.json ── loopme-daemon hook ──┘   (事件文件写到 <数据目录>/inbox/)
 ```
 
 | 目录 | 内容 |
@@ -40,20 +41,24 @@ Mac 菜单栏 App ────── 同一协议, 127.0.0.1 ─────┘ 
 1. 明文握手：手机 `{"t":"hello","deviceId","nonce"}`，Mac `{"t":"hello","nonce"}`；设备已解除配对时回 `{"t":"error","code":"unknown_device"}`。
 2. 之后全部是加密的二进制帧，内容为 JSON：
    - 请求 `{"id","method","params"}`，响应 `{"id","result"}` 或 `{"id","error":{"code","message"}}`。
-   - 事件 `{"event","seq","data"}`：`message`、`messageDelta`（流式全文）、`item`、`decision`、`memory`、`profile`、`settings`、`status`、`devices`、`pairing`、`resync`。
+   - 事件 `{"event","seq","data"}`：`message`、`messageDelta`（流式全文）、`item`、`decision`、`memory`、`profile`、`settings`、`status`、`devices`、`pairing`、`session`（你自己的 Codex 会话）、`resync`。
 
 | 方法 | 说明 |
 | --- | --- |
-| `sync` | 全量快照（最近 300 条消息、事项、决定、记忆、Profile、设置、状态、设备） |
-| `message.send {clientId, text}` | 发消息；`clientId` 去重 |
+| `sync` | 全量快照（最近 300 条消息、事项、决定、记忆、Profile、设置、状态、设备、最近一天的 Codex 会话） |
+| `message.send {clientId, text, replyTo?}` | 发消息；`clientId` 去重；`replyTo` 引用一条旧消息，作为上下文一起给 Agent |
+| `message.feedback {messageId, value: up/down/""}` | 👍/👎；👎 过的消息会写进上下文，让 Agent 少发这类 |
+| `offer.act {messageId, action, clientId}` | 点卡片上的按钮：`take`（让我来）、`mine`、`ignore`、`stop`、`push`、`undo` |
+| `offer.diff {messageId}` | 结果卡的改动（patch 文本） |
+| `app.opened` | App 到了前台；当天第一次会开始“今天的第一句话” |
 | `run.stop` | 停止当前工作，并丢弃排队的工作 |
-| `decision.answer {decisionId, choice: approve/reject, clientId}` | 回答决定（去重、幂等） |
+| `decision.answer {decisionId, choice: approve/reject/later, clientId}` | 回答决定（去重、幂等）；`later` = 回 Mac 再说 |
 | `item.action {itemId, action, minutes?}` | `done` / `drop` / `snooze` / `checkNow` / `follow` / `ignore` |
 | `memory.add/update/delete/restore` | 记忆编辑；删除保留墓碑，阻止相似内容被写回 |
 | `profile.update`、`settings.update` | 局部更新 |
 | `push.register {token, env}` | 上报 APNs token |
 | `push.test`、`sessions.analyze`、`device.unpair`、`ping` | |
-| 仅 Mac 本机：`pairing.start/cancel/confirm/state`、`devices.revoke`、`status.refresh`、`codex.login`、`brief.now` | |
+| 仅 Mac 本机：`pairing.start/cancel/confirm/state`、`devices.revoke`、`status.refresh`、`codex.login`、`brief.now`、`hooks.enable`、`hooks.disable` | |
 
 Mac App 用 daemon 写在数据目录的 `local-client.json`（权限 0600）作为本机设备凭据，走同一协议。
 
@@ -65,10 +70,36 @@ Mac App 用 daemon 写在数据目录的 `local-client.json`（权限 0600）作
 - 每轮输入前会附上上下文：当前时间、Profile、记忆、“不要再记”、进行中的事项。
 - 权限档位映射：只读 → `read-only`；自动 · 仅工作区 → `workspace-write`（授权文件夹为可写根目录）；完全访问 → `danger-full-access`；审批策略 `on-request`。
 - Codex 的审批请求变成“决定”卡片并推送，用户在手机上同意或拒绝；超时（默认 48 小时）按拒绝处理。
-- 会话分析：`thread/list` 读取本机最近 7 天的 CLI / VS Code / exec 会话（排除 LoopMe 自己的线程和已推荐过的会话），由 Agent 挑出最多 3 件建议跟进的事。
+- 会话分析：`thread/list` 读取本机所有目录最近 7 天的 CLI / VS Code / exec 会话（排除 LoopMe 自己的线程和已推荐过的会话），由 Agent 挑出最多 3 件：能直接做完的提成“可以接手”卡片，只值得跟进的提成建议（一次只显示一条）。
+
+## 你自己的 Codex 会话（hooks）
+
+- Codex 0.166 会执行 `$CODEX_HOME/hooks.json`（默认 `~/.codex/hooks.json`）里的 command hook，但每条 hook 要先在用户的 `config.toml` 里标记信任（`hooks.state."<key>".trusted_hash`）才会运行。
+- 一次确认：Mac 上点“接入”后，daemon 往 hooks.json 加 6 条 hook（`SessionStart`、`UserPromptSubmit`、`Stop`、`PermissionRequest`、`SessionEnd`、`Interrupt`），用户原有的 hook 不动；再通过 app-server 的 `hooks/list` + `config/batchWrite` 标记信任。之后每 10 分钟检查一次，App 换了位置会自动重新接入。关闭时只删 LoopMe 自己的条目。
+- hook 命令就是 daemon 自己：`loopme-daemon hook --loopme-data-dir <数据目录>`。它把事件压缩后写到 `<数据目录>/inbox/`，立刻退出；daemon 每 0.5 秒收一次。LoopMe 自己启动的 Codex 带 `LOOPME_INTERNAL=1`，它的 hook 会被跳过。
+- `PermissionRequest`：你不在 Mac 前时，变成手机上的“你的 Codex 在等授权”卡片（同意 / 拒绝 / 回 Mac 再说），hook 最多等 14 分钟；你回到 Mac 或选“回 Mac 再说”时，hook 不给答案，Codex 照常在 Mac 上问你。
+- 设置里的“不看这些文件夹”下的会话会被忽略。
+
+## 信号 → 消息
+
+- 在不在 Mac 前：macOS 上读 `ioreg` 的 HID 空闲时间，超过 5 分钟算离开（数据目录下的 `presence` 文件写 `desk`/`away` 可以覆盖，用于测试）。在 Mac 前时不推送，只更新菜单栏和“现在”条。
+- 会话停下且你不在 → 2 分钟合并窗口后让 Agent 只读看一眼；会话 4 小时没动静 → 每天最多看一次。每天最多 3 张这类卡片；你选了“我自己来 / 别管它”的会话不再提。
+- Agent 用控制块里的 `offers` 发卡片：`takeover`（可以接手）或 `info`（一句话知会）。
+
+## 让我来
+
+- 在 `<数据目录>/worktrees/` 下用 `git worktree` 新建分支 `loopme/<任务>-<日期>`，从你当前的 HEAD 分出；会话里未提交的改动先作为一个提交带过去。你的工作区和分支完全不动。
+- Codex 只在这个 worktree 里写（可写根目录 = worktree + 仓库的 `.git`），改完跑测试并提交，不推送。
+- 做完发一张结果卡：看改动（patch）、推送（`git push -u origin <分支>`，手机上会再确认一次）、撤销（删 worktree 和分支）。中途点停止会丢弃改动。
+
+## “现在”条
+
+- 客户端根据快照计算：等你决定（待处理的决定） > 正在做（当前任务和它正在执行的步骤 `status.currentRun.step`） > 在盯（进行中的事项和你自己的 Codex 会话）。不显示下次检查时间。
 
 ## 调度与通知
 
-- 每 30 秒检查：到期的事项检查、早间汇报（默认工作日 09:00，超过 3 小时不再补发）、暂停到期、决定超时、安静时段后补发通知。
+- 每 30 秒检查：到期的事项检查、暂停到期、决定超时、安静时段后补发通知。
+- 今天的第一句话：当天第一次回到 Mac（5 点以后）或打开 App 时发，默认只在工作日。
+- 检查频率由 Agent 按等待的东西给出（外部结果约 5 分钟、review 约 30 分钟、其它约 3 小时）；没有变化时间隔翻倍，最长 2 小时（Agent 给的更长时以它为准）。
 - 事项连续 10 次检查无变化 → 发一个“是否继续跟进”的决定。
 - 通知只在三种情况发：需要你决定、交代的事有结果、执行失败。限额：同一事项每天 2 次（决定不受限），全局每小时 5 条，超出后合并；安静时段（默认 22:00–08:00）内延后。锁屏默认只显示“你的 Agent 有新消息”。

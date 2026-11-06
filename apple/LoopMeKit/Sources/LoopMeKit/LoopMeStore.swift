@@ -13,6 +13,8 @@ public final class LoopMeStore: ObservableObject {
     @Published public private(set) var settings = Settings()
     @Published public private(set) var status = Status()
     @Published public private(set) var devices: [Device] = []
+    /// The user's own Codex sessions (via Codex hooks), by id.
+    @Published public private(set) var sessions: [String: CodexSession] = [:]
     @Published public private(set) var pairing = PairingState()
     @Published public private(set) var connection: LoopMeConnection.State = .idle
     @Published public private(set) var credentials: MacCredentials?
@@ -22,11 +24,18 @@ public final class LoopMeStore: ObservableObject {
     @Published public private(set) var answering: [String: String] = [:]
     @Published public var lastError: String?
     @Published public private(set) var hasSynced = false
+    /// The message the next chat message replies to (long press → 回复).
+    @Published public var replyTo: Message?
+    /// Offer message id → action, while the tap is in flight.
+    @Published public private(set) var acting: [String: String] = [:]
+    /// Which open suggestion is shown (suggestions come one at a time).
+    @Published public var suggestionIndex = 0
 
     public struct OutgoingMessage: Identifiable, Equatable {
         public let id: String
         public let text: String
         public let createdAt: Date
+        public var replyTo: String? = nil
     }
 
     public let conn = LoopMeConnection()
@@ -62,6 +71,7 @@ public final class LoopMeStore: ObservableObject {
             Task {
                 await sync()
                 if let p = pushToken { _ = await run("push.register", ["token": p.token, "env": p.env]) }
+                appOpened()
             }
         } else {
             answering = [:]
@@ -85,7 +95,9 @@ public final class LoopMeStore: ObservableObject {
         decisions = [:]
         memory = []
         devices = []
+        sessions = [:]
         outgoing = []
+        replyTo = nil
         hasSynced = false
         saveCredentials?(nil)
     }
@@ -101,6 +113,7 @@ public final class LoopMeStore: ObservableObject {
             settings = snap.settings
             status = snap.status
             devices = snap.devices
+            sessions = Dictionary(snap.sessions.map { ($0.id, $0) }, uniquingKeysWith: { _, b in b })
             hasSynced = true
             if !conn.isConnected { return }
             if let c = credentials, c.macName != snap.status.macName, !snap.status.macName.isEmpty {
@@ -134,6 +147,7 @@ public final class LoopMeStore: ObservableObject {
         case "message":
             guard let m = decode(Message.self, data) else { return }
             if let i = messages.firstIndex(where: { $0.id == m.id }) {
+                if messages[i].offer != m.offer { acting[m.id] = nil }
                 messages[i] = m
             } else {
                 messages.append(m)
@@ -163,6 +177,8 @@ public final class LoopMeStore: ObservableObject {
             if let s = decode(Status.self, data) { status = s }
         case "devices":
             if let d = decode([Device].self, data) { devices = d }
+        case "session":
+            if let s = decode(CodexSession.self, data) { sessions[s.id] = s }
         case "pairing":
             if let p = decode(PairingState.self, data) { pairing = p }
         case "resync":
@@ -184,6 +200,33 @@ public final class LoopMeStore: ObservableObject {
 
     public var isWorking: Bool { status.agent == "working" }
 
+    /// Suggested items waiting for the user, oldest first. Shown one at a time.
+    public var openSuggestions: [Item] {
+        items.values.filter { $0.status == "suggested" }.sorted { $0.createdAt < $1.createdAt }
+    }
+
+    public var currentSuggestion: Item? {
+        let s = openSuggestions
+        return s.isEmpty ? nil : s[suggestionIndex % s.count]
+    }
+
+    public func nextSuggestion() {
+        suggestionIndex += 1
+    }
+
+    /// The user's sessions LoopMe is watching right now (newest first).
+    public var watchedSessions: [CodexSession] {
+        let since = nowMillis() - 24 * 3600 * 1000
+        return sessions.values
+            .filter { $0.state != "ended" && $0.updatedAt >= since && !$0.muted }
+            .sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    public func message(_ id: String?) -> Message? {
+        guard let id else { return nil }
+        return messages.first { $0.id == id }
+    }
+
     // MARK: actions
 
     private func run(_ method: String, _ params: [String: Any] = [:]) async -> Data? {
@@ -201,13 +244,59 @@ public final class LoopMeStore: ObservableObject {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty, isConnected else { return false }
         let clientId = UUID().uuidString
-        outgoing.append(OutgoingMessage(id: clientId, text: t, createdAt: Date()))
+        var params: [String: Any] = ["clientId": clientId, "text": t]
+        let quoted = replyTo?.id
+        if let quoted { params["replyTo"] = quoted }
+        outgoing.append(OutgoingMessage(id: clientId, text: t, createdAt: Date(), replyTo: quoted))
+        replyTo = nil
         Task {
-            if await run("message.send", ["clientId": clientId, "text": t]) == nil {
+            if await run("message.send", params) == nil {
                 outgoing.removeAll { $0.id == clientId }
             }
         }
         return true
+    }
+
+    /// 👍 / 👎 on an agent message; the same value again clears it.
+    public func feedback(_ message: Message, _ value: String) {
+        let v = message.feedback == value ? "" : value
+        Task { _ = await run("message.feedback", ["messageId": message.id, "value": v]) }
+    }
+
+    /// A tap on an offer card's button (让我来, 我自己来, 推送, 撤销 …).
+    public func offerAct(_ message: Message, _ action: String) {
+        guard isConnected, acting[message.id] == nil else { return }
+        acting[message.id] = action
+        Task {
+            if await run("offer.act", ["messageId": message.id, "action": action, "clientId": UUID().uuidString]) == nil {
+                acting[message.id] = nil
+            }
+        }
+    }
+
+    /// The agent's changes behind a result card (看改动).
+    public func offerDiff(_ message: Message) async -> String {
+        do {
+            let d = try await conn.call("offer.diff", ["messageId": message.id])
+            return (try? JSONDecoder().decode(DiffReply.self, from: d).diff) ?? ""
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    /// The app is in front of the user: the first time today starts the brief.
+    public func appOpened() {
+        guard isConnected else { return }
+        Task { _ = await run("app.opened") }
+    }
+
+    /// The Mac's one-time confirm: install LoopMe's Codex hooks and trust them.
+    public func enableCodexHooks() {
+        Task { _ = await run("hooks.enable") }
+    }
+
+    public func disableCodexHooks() {
+        Task { _ = await run("hooks.disable") }
     }
 
     public func stopRun() {
@@ -215,10 +304,15 @@ public final class LoopMeStore: ObservableObject {
     }
 
     public func answer(_ decision: Decision, approve: Bool) {
+        answer(decision, choice: approve ? "approve" : "reject")
+    }
+
+    /// `approve`, `reject`, or `later` (回 Mac 再说: Codex asks again on the Mac).
+    public func answer(_ decision: Decision, choice: String) {
         guard isConnected, answering[decision.id] == nil else { return }
-        answering[decision.id] = approve ? "approve" : "reject"
+        answering[decision.id] = choice
         Task {
-            if await run("decision.answer", ["decisionId": decision.id, "choice": approve ? "approve" : "reject", "clientId": UUID().uuidString]) == nil {
+            if await run("decision.answer", ["decisionId": decision.id, "choice": choice, "clientId": UUID().uuidString]) == nil {
                 answering[decision.id] = nil
             }
         }
@@ -343,4 +437,8 @@ private struct MessageDelta: Decodable {
 
 private struct PushReport: Decodable {
     let report: String
+}
+
+private struct DiffReply: Decodable {
+    let diff: String
 }

@@ -3,6 +3,7 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject var store: LoopMeStore
+    @Environment(\.scenePhase) private var scenePhase
     @State private var incomingLink: String?
     @State private var showSettings = false
 
@@ -32,6 +33,10 @@ struct RootView: View {
             }
         }
         .background(Theme.background.ignoresSafeArea())
+        .onChange(of: scenePhase) { _, phase in
+            // Opening the app counts as showing up: the first time today starts the brief.
+            if phase == .active { store.appOpened() }
+        }
         .onOpenURL { url in
             if store.credentials == nil { incomingLink = url.absoluteString }
         }

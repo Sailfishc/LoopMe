@@ -114,12 +114,21 @@ public enum Fmt {
         switch s {
         case "scheduled": return "已安排"
         case "active": return "进行中"
-        case "needsYou": return "需要你"
+        case "needsYou": return "等你决定"
         case "snoozed": return "稍后提醒"
         case "done": return "已完成"
         case "dropped": return "不再跟进"
         case "suggested": return "建议跟进"
         default: return s
+        }
+    }
+
+    public static func sessionState(_ s: String) -> String {
+        switch s {
+        case "working": return "正在跑"
+        case "waitingApproval": return "等授权"
+        case "ended": return "已结束"
+        default: return "停下了"
         }
     }
 

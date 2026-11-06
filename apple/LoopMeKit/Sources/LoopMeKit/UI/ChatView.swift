@@ -1,9 +1,16 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
 
 /// The single conversation stream with item and decision cards.
 public struct ChatView: View {
     @EnvironmentObject var store: LoopMeStore
     @State private var draft = ""
+    @State private var nowExpanded = false
+    @State private var selecting: Message?
     @FocusState private var inputFocused: Bool
 
     public init() {}
@@ -11,7 +18,7 @@ public struct ChatView: View {
     public var body: some View {
         VStack(spacing: 0) {
             connectionBanner
-            needsYouBanner
+            NowBar(expanded: $nowExpanded)
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
@@ -19,12 +26,15 @@ public struct ChatView: View {
                             emptyState
                         }
                         ForEach(store.messages) { m in
-                            MessageRow(message: m).id(m.id)
+                            if isShown(m) {
+                                MessageRow(message: m, onSelectText: { selecting = $0 }, onReply: { reply(to: $0) }).id(m.id)
+                            }
                         }
                         ForEach(store.outgoing) { o in
                             HStack {
                                 Spacer(minLength: 48)
                                 VStack(alignment: .trailing, spacing: 3) {
+                                    if let q = store.message(o.replyTo) { QuoteLine(text: q.text) }
                                     Text(o.text)
                                         .padding(.horizontal, 14).padding(.vertical, 10)
                                         .foregroundStyle(Theme.text)
@@ -34,7 +44,7 @@ public struct ChatView: View {
                             }
                             .id(o.id)
                         }
-                        if store.isWorking {
+                        if store.isWorking && store.status.currentRun?.messageId == nil && !nowExpanded {
                             WorkingRow().id("working")
                         }
                         Color.clear.frame(height: 4).id("bottom")
@@ -60,6 +70,43 @@ public struct ChatView: View {
             inputBar
         }
         .background(Theme.background)
+        .overlay(alignment: .top) {
+            if nowExpanded {
+                ZStack(alignment: .top) {
+                    Color.black.opacity(0.35)
+                        .ignoresSafeArea()
+                        .onTapGesture { withAnimation(.easeOut(duration: 0.2)) { nowExpanded = false } }
+                    ScrollView {
+                        NowPanel(onClose: { withAnimation(.easeOut(duration: 0.2)) { nowExpanded = false } })
+                            .padding(.horizontal, 16)
+                    }
+                    .frame(maxHeight: 460)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.top, nowBarHeight)
+                .transition(.opacity)
+            }
+        }
+        .onChange(of: store.nowSummary == nil) { _, empty in
+            if empty { nowExpanded = false }
+        }
+        .sheet(item: $selecting) { m in
+            SelectTextSheet(text: m.text)
+        }
+    }
+
+    /// Room for the connection banner and the "现在" bar above the expanded panel.
+    private var nowBarHeight: CGFloat { store.isConnected ? 56 : 92 }
+
+    /// Suggestions come one at a time; the others wait behind 换一个.
+    private func isShown(_ m: Message) -> Bool {
+        guard m.role == "system", let iid = m.itemId, let item = store.items[iid], item.status == "suggested" else { return true }
+        return store.currentSuggestion?.id == item.id
+    }
+
+    private func reply(to m: Message) {
+        store.replyTo = m
+        inputFocused = true
     }
 
     @ViewBuilder private var connectionBanner: some View {
@@ -78,19 +125,6 @@ public struct ChatView: View {
         }
     }
 
-    @ViewBuilder private var needsYouBanner: some View {
-        let n = store.pendingDecisions.count
-        if n > 0 {
-            HStack(spacing: 8) {
-                Circle().fill(Theme.warning).frame(width: 8, height: 8)
-                Text("有 \(n) 件事需要你决定").font(.subheadline.weight(.medium)).foregroundStyle(Theme.text)
-                Spacer()
-            }
-            .padding(.horizontal, 16).padding(.vertical, 10)
-            .background(Theme.warning.opacity(0.12))
-        }
-    }
-
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("你好，我在你的 Mac 上。").font(.title3.weight(.semibold)).foregroundStyle(Theme.text)
@@ -104,6 +138,32 @@ public struct ChatView: View {
     }
 
     private var inputBar: some View {
+        VStack(spacing: 6) {
+            if let q = store.replyTo {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("回复 · 这条会作为上下文一起发给 Agent").font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
+                        Text(q.offer?.title ?? q.text).font(.caption).foregroundStyle(Theme.secondary).lineLimit(1)
+                    }
+                    Spacer()
+                    Button { store.replyTo = nil } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.secondary)
+                        .accessibilityLabel("取消回复")
+                }
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(Theme.card, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2).fill(Theme.accent).frame(width: 3).padding(.vertical, 6)
+                }
+            }
+            inputRow
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .background(Theme.background)
+    }
+
+    private var inputRow: some View {
         HStack(alignment: .bottom, spacing: 10) {
             TextField("和 Agent 说点什么", text: $draft, axis: .vertical)
                 .textFieldStyle(.plain)
@@ -131,8 +191,6 @@ public struct ChatView: View {
                 .keyboardShortcut(.return, modifiers: .command)
             }
         }
-        .padding(.horizontal, 12).padding(.vertical, 10)
-        .background(Theme.background)
     }
 
     private var canSend: Bool {
@@ -161,28 +219,45 @@ struct WorkingRow: View {
 public struct MessageRow: View {
     @EnvironmentObject var store: LoopMeStore
     let message: Message
+    var onSelectText: ((Message) -> Void)?
+    var onReply: ((Message) -> Void)?
 
-    public init(message: Message) { self.message = message }
+    public init(message: Message, onSelectText: ((Message) -> Void)? = nil, onReply: ((Message) -> Void)? = nil) {
+        self.message = message
+        self.onSelectText = onSelectText
+        self.onReply = onReply
+    }
 
     public var body: some View {
         switch message.role {
         case "user":
             HStack {
                 Spacer(minLength: 48)
-                Text(message.text)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 14).padding(.vertical, 10)
-                    .foregroundStyle(Theme.text)
-                    .background(Theme.userBubble, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                VStack(alignment: .trailing, spacing: 4) {
+                    if let q = store.message(message.replyTo) { QuoteLine(text: q.offer?.title ?? q.text) }
+                    Text(message.text)
+                        .padding(.horizontal, 14).padding(.vertical, 10)
+                        .foregroundStyle(Theme.text)
+                        .background(Theme.userBubble, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .contextMenu { menu(feedback: false) }
+                }
             }
         case "agent":
-            VStack(alignment: .leading, spacing: 10) {
-                if !message.text.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                if let offer = message.offer {
+                    OfferCard(message: message, offer: offer)
+                        .contextMenu { menu(feedback: true) }
+                } else if !message.text.isEmpty {
                     (Text(markdown(message.text)) + Text(message.streaming ? " ▍" : "").foregroundColor(Theme.secondary))
                         .font(.body)
                         .foregroundStyle(Theme.text)
-                        .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .contextMenu { menu(feedback: true) }
+                }
+                if let f = message.feedback {
+                    Text(f == "up" ? "👍 你觉得有用" : "👎 你觉得没用，以后少发这类")
+                        .font(.caption2).foregroundStyle(Theme.secondary)
                 }
                 attachments
             }
@@ -198,6 +273,28 @@ public struct MessageRow: View {
         }
     }
 
+    /// Long press: 👍/👎 (agent messages), 复制, 选择文本, 回复.
+    @ViewBuilder private func menu(feedback: Bool) -> some View {
+        if feedback && !message.streaming {
+            ControlGroup {
+                Button { store.feedback(message, "up") } label: { Label("有用", systemImage: message.feedback == "up" ? "hand.thumbsup.fill" : "hand.thumbsup") }
+                Button { store.feedback(message, "down") } label: { Label("没用", systemImage: message.feedback == "down" ? "hand.thumbsdown.fill" : "hand.thumbsdown") }
+            }
+        }
+        Button { Clipboard.copy(copyText) } label: { Label("复制", systemImage: "doc.on.doc") }
+        if let onSelectText {
+            Button { onSelectText(message) } label: { Label("选择文本", systemImage: "text.cursor") }
+        }
+        if let onReply, !message.streaming {
+            Button { onReply(message) } label: { Label("回复", systemImage: "arrowshape.turn.up.left") }
+        }
+    }
+
+    private var copyText: String {
+        guard let o = message.offer else { return message.text }
+        return [o.title, o.detail].filter { !$0.isEmpty }.joined(separator: "\n")
+    }
+
     @ViewBuilder private var attachments: some View {
         if let did = message.decisionId, let d = store.decisions[did] {
             DecisionCard(decision: d)
@@ -208,5 +305,59 @@ public struct MessageRow: View {
 
     private func markdown(_ s: String) -> AttributedString {
         (try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
+    }
+}
+
+/// The quoted message above a reply.
+struct QuoteLine: View {
+    let text: String
+    var body: some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(Theme.secondary)
+            .lineLimit(1)
+            .padding(.leading, 8)
+            .overlay(alignment: .leading) { RoundedRectangle(cornerRadius: 1).fill(Theme.accent).frame(width: 2) }
+            .frame(maxWidth: 260, alignment: .trailing)
+    }
+}
+
+/// 选择文本: the message in a sheet where any part can be selected.
+struct SelectTextSheet: View {
+    let text: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(text)
+                    .textSelection(.enabled)
+                    .foregroundStyle(Theme.text)
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(Theme.background)
+            .navigationTitle("选择文本")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
+            }
+        }
+        #if os(macOS)
+        .frame(minWidth: 420, minHeight: 300)
+        #endif
+    }
+}
+
+public enum Clipboard {
+    public static func copy(_ s: String) {
+        #if canImport(UIKit)
+        UIPasteboard.general.string = s
+        #elseif canImport(AppKit)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(s, forType: .string)
+        #endif
     }
 }

@@ -12,6 +12,58 @@ public struct Message: Codable, Identifiable, Equatable, Hashable {
     public var decisionId: String?
     public var createdAt: Int64
     public var streaming: Bool
+    /// The message this one replies to (sent to the agent as context).
+    public var replyTo: String?
+    /// The user's reaction to an agent message: `up` or `down`.
+    public var feedback: String?
+    /// Makes the message an actionable card.
+    public var offer: Offer?
+}
+
+/// An actionable card: every proactive message carries one.
+public struct Offer: Codable, Equatable, Hashable {
+    /// `takeover`, `result` or `info`.
+    public var kind: String
+    /// Small label above the title, e.g. 可以接手 / 做完了.
+    public var label: String
+    public var title: String
+    public var detail: String
+    /// Evidence behind 看依据.
+    public var why: String?
+    public var sessionId: String?
+    public var cwd: String?
+    public var task: String?
+    public var branch: String?
+    public var base: String?
+    public var worktree: String?
+    public var actions: [OfferAction]
+    /// `open`, `working`, `done`, `closed`.
+    public var state: String
+    public var chosen: String?
+    /// One line after a choice, e.g. 你选了：我自己来.
+    public var note: String?
+}
+
+public struct OfferAction: Codable, Equatable, Hashable, Identifiable {
+    public var id: String
+    public var label: String
+    /// `primary`, `secondary` or `plain`.
+    public var style: String
+}
+
+/// One of the user's own Codex sessions, seen through Codex hooks.
+public struct CodexSession: Codable, Equatable, Hashable, Identifiable {
+    public var id: String
+    public var cwd: String
+    public var title: String
+    public var branch: String?
+    /// `working`, `waitingApproval`, `idle`, `ended`.
+    public var state: String
+    public var lastPrompt: String?
+    public var lastMessage: String?
+    public var startedAt: Int64
+    public var updatedAt: Int64
+    public var muted: Bool
 }
 
 public struct Item: Codable, Identifiable, Equatable, Hashable {
@@ -27,6 +79,7 @@ public struct Item: Codable, Identifiable, Equatable, Hashable {
     public var unchangedChecks: Int64
     public var createdAt: Int64
     public var updatedAt: Int64
+    public var intervalMin: Int64?
 
     public var isOpen: Bool { status != "done" && status != "dropped" }
 }
@@ -36,7 +89,7 @@ public struct Decision: Codable, Identifiable, Equatable, Hashable {
     public var itemId: String?
     public var title: String
     public var detail: String
-    /// `approval`, `question` or `continue`.
+    /// `approval`, `sessionApproval` (from the user's own Codex while away), `question` or `continue`.
     public var kind: String
     /// `pending`, `approved`, `rejected`, `expired`.
     public var status: String
@@ -96,6 +149,10 @@ public struct Settings: Codable, Equatable {
     public var showSteps: Bool = false
     public var lockScreenSummary: Bool = false
     public var sessionAnalysis: Bool = true
+    /// Watching the user's own Codex sessions through Codex hooks.
+    public var codexHooks: Bool = false
+    public var ignoredDirs: [String] = []
+    public var remoteApprovals: Bool = true
     public var codexPath: String?
     public var model: String?
     public var limits = Limits()
@@ -115,6 +172,10 @@ public struct RunInfo: Codable, Equatable {
     public var id: String
     public var title: String
     public var startedAt: Int64
+    /// What the run is doing right now.
+    public var step: String?
+    /// The offer card this run belongs to (让我来).
+    public var messageId: String?
 }
 
 public struct Status: Codable, Equatable {
@@ -124,7 +185,10 @@ public struct Status: Codable, Equatable {
     /// `idle`, `working`, `paused`, `error`.
     public var agent: String = "idle"
     public var currentRun: RunInfo?
-    public var nextWakeAt: Int64?
+    /// The user is at the Mac.
+    public var atDesk: Bool = false
+    /// Codex hooks: `off`, `on`, `untrusted` or `error`.
+    public var hooks: String = "off"
     public var pushConfigured: Bool = false
     public var listenPort: Int = 7788
     public var hosts: [String] = []
@@ -150,6 +214,7 @@ public struct Snapshot: Codable {
     public var settings: Settings
     public var status: Status
     public var devices: [Device]
+    public var sessions: [CodexSession]
 }
 
 public struct PairingState: Codable, Equatable {

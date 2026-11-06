@@ -38,10 +38,15 @@ struct LoopMeMacApp: App {
     }
 }
 
+/// Menu bar: an icon, plus a short word while something is going on (等你决定 / 正在做).
 struct MenuBarIcon: View {
     @EnvironmentObject var store: LoopMeStore
     var body: some View {
-        Image(systemName: store.pendingDecisions.isEmpty ? (store.isWorking ? "circle.dotted.circle" : "circle.circle") : "exclamationmark.circle.fill")
+        let text = store.nowSummary?.menuBarText ?? ""
+        HStack(spacing: 4) {
+            Image(systemName: store.pendingDecisions.isEmpty ? (store.isWorking ? "circle.dotted.circle" : "circle.circle") : "exclamationmark.circle.fill")
+            if !text.isEmpty { Text(text) }
+        }
     }
 }
 
